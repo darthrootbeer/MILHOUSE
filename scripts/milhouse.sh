@@ -142,28 +142,45 @@ Milhouse: Simplified Autonomous Development Loop
 A streamlined autonomous development loop for Cursor with heuristic-based
 context rotation. Runs agents to complete tasks defined in MILHOUSE_TASK.md.
 
-Usage:
+USAGE
   ./milhouse.sh [mode] [workspace]
 
-Modes:
-  --once        Run a single iteration then stop (default for testing)
-  --loop        Run continuous loop until completion or max iterations (default)
-  --setup       Interactive setup for first-time configuration
+MODES
+  --once        Run a single iteration then stop
+  --loop        Run continuous loop until completion (default)
+  --setup       Interactive setup for model and options
   --help        Show this help message
 
-Arguments:
+ARGUMENTS
   workspace     Path to project directory (default: current directory)
 
-Examples:
-  ./milhouse.sh                    # Run in loop mode (current directory)
-  ./milhouse.sh --once             # Run one iteration then stop
-  ./milhouse.sh --loop /path/to/project
-  ./milhouse.sh --setup            # Interactive setup
+ENVIRONMENT VARIABLES
+  MILHOUSE_MODEL              AI model to use (default: opus-4.5-thinking)
+  MILHOUSE_MAX_ITERATIONS     Maximum iterations before stopping (default: 20)
+  MILHOUSE_ROTATION_INTERVAL  Fixed rotation every N iterations (default: 5)
 
-Requirements:
-  - MILHOUSE_TASK.md in the project root
-  - Git repository initialized
-  - cursor-agent CLI installed and in PATH
+EXAMPLES
+  ./milhouse.sh                              # Loop mode, current directory
+  ./milhouse.sh --once                       # Single iteration, then stop
+  ./milhouse.sh --loop /path/to/project      # Loop mode, specific project
+  ./milhouse.sh --setup                      # Interactive configuration
+  MILHOUSE_MODEL=sonnet-4 ./milhouse.sh      # Use specific model
+  MILHOUSE_MAX_ITERATIONS=50 ./milhouse.sh   # Run up to 50 iterations
+
+REQUIREMENTS
+  - MILHOUSE_TASK.md: Task file with completion criteria (checkboxes)
+  - Git repository: Initialized in the project directory
+  - cursor-agent: CLI tool installed and in PATH
+
+TASK FILE FORMAT
+  Create MILHOUSE_TASK.md with checkboxes for completion criteria:
+
+    ## Completion criteria
+    - [ ] Implement feature X
+    - [ ] Add tests for feature X
+    - [ ] Update documentation
+
+  Milhouse marks items [x] as they're completed.
 
 For more information, see README.md
 EOF
