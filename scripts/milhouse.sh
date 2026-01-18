@@ -131,6 +131,35 @@ show_progress() {
   fi
 }
 
+# Display a header with consistent styling
+# Args: title, [color_code] (optional: 10=success, 1=error, 3=warning, 12=info)
+show_header() {
+  local title="$1"
+  local color="${2:-212}"  # Default to accent color
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --border double --padding "0 2" --border-foreground "$color" "$title"
+  else
+    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    printf "║  %-64s ║\n" "$title"
+    echo "╚═══════════════════════════════════════════════════════════════════╝"
+  fi
+}
+
+# Display a section divider with title
+# Args: title
+show_section() {
+  local title="$1"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --border single --padding "0 1" --border-foreground 8 "$title"
+  else
+    echo "┌───────────────────────────────────────────────────────────────────┐"
+    printf "│ %-65s │\n" "$title"
+    echo "└───────────────────────────────────────────────────────────────────┘"
+  fi
+}
+
 # =============================================================================
 # HELP TEXT
 # =============================================================================
@@ -1104,9 +1133,7 @@ run_single_iteration() {
   local model="${2:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
   
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "📋 Single Iteration Mode"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "📋 Single Iteration Mode" 12
   echo ""
   
   # Check current completion status
@@ -1179,9 +1206,7 @@ run_single_iteration() {
   IFS=':' read -r total done_count remaining <<< "$counts"
   
   echo ""
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "📋 Single Iteration Complete"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "📋 Single Iteration Complete" 12
   echo ""
   
   if [[ "$task_status" == "COMPLETE" ]]; then
@@ -1210,9 +1235,7 @@ run_milhouse_loop() {
   local model="${3:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
   
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "🔄 Loop Mode (max: $max_iterations iterations)"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "🔄 Loop Mode (max: $max_iterations iterations)" 12
   echo ""
   
   # Commit any uncommitted work first
@@ -1249,9 +1272,7 @@ run_milhouse_loop() {
     counts=$(read_task_file "$workspace")
     IFS=':' read -r total done_count remaining <<< "$counts"
     
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo "Iteration $iteration / $max_iterations"
-    echo "═══════════════════════════════════════════════════════════════════"
+    show_section "Iteration $iteration / $max_iterations"
     echo ""
     show_progress "$iteration" "$done_count" "$total" "$remaining"
     echo ""
@@ -1279,12 +1300,10 @@ run_milhouse_loop() {
     
     if [[ "$task_status" == "COMPLETE" ]]; then
       echo ""
-      echo "═══════════════════════════════════════════════════════════════════"
-      echo "🎉 MILHOUSE COMPLETE! All criteria satisfied."
-      echo "═══════════════════════════════════════════════════════════════════"
+      show_header "🎉 MILHOUSE COMPLETE! All criteria satisfied." 10
       echo ""
-      echo "Completed in $iteration iteration(s)."
-      echo "Check git log for detailed history."
+      show_success "Completed in $iteration iteration(s)."
+      show_info "Check git log for detailed history."
       return 0
     fi
     
@@ -1299,18 +1318,15 @@ run_milhouse_loop() {
     local gutter_reason=""
     if gutter_reason=$(check_gutter "$workspace" "$iteration" "$duration_seconds" "$output_file" "MILHOUSE_TASK.md"); then
       echo ""
-      echo "═══════════════════════════════════════════════════════════════════"
-      echo "🚨 Gutter detected - stopping loop"
-      echo "═══════════════════════════════════════════════════════════════════"
+      show_header "🚨 Gutter detected - stopping loop" 1
       echo ""
-      echo "Reason: $gutter_reason"
+      show_warning "Reason: $gutter_reason"
       echo ""
-      echo "Review $output_file and consider:"
+      show_info "Review $output_file and consider:"
       echo "  1. Add a guardrail to .milhouse/guardrails.md"
       echo "  2. Simplify MILHOUSE_TASK.md"
       echo "  3. Fix the blocking issue manually"
       echo ""
-      log_gutter_reason "$gutter_reason"
       return 1
     fi
     
@@ -1322,9 +1338,7 @@ run_milhouse_loop() {
   
   # Max iterations reached
   echo ""
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "⚠️  Maximum iterations reached ($max_iterations)"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "⚠️  Maximum iterations reached ($max_iterations)" 3
   echo ""
   task_status=$(check_task_complete "$workspace")
   if [[ "$task_status" == "COMPLETE" ]]; then
@@ -1416,15 +1430,11 @@ confirm_setup_plain() {
   local workspace="$3"
   
   echo ""
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "Configuration Summary"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "Configuration Summary" 212
   echo ""
-  echo "  Model:      $model"
-  echo "  Max iter:   $iterations"
-  echo "  Workspace:  $workspace"
-  echo ""
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_info "Model:      $model"
+  show_info "Max iter:   $iterations"
+  show_info "Workspace:  $workspace"
   echo ""
   read -rp "Start Milhouse with these settings? [y/N]: " confirm
   [[ "$confirm" =~ ^[Yy] ]]
@@ -1454,11 +1464,9 @@ interactive_setup() {
       return 1
     fi
   else
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo "Milhouse Interactive Setup"
-    echo "═══════════════════════════════════════════════════════════════════"
+    show_header "Milhouse Interactive Setup" 12
     echo ""
-    echo "(Install 'gum' for a better experience: https://github.com/charmbracelet/gum)"
+    show_info "(Install 'gum' for a better experience: https://github.com/charmbracelet/gum)"
     echo ""
     
     # Model selection
@@ -1485,11 +1493,10 @@ interactive_setup() {
 # =============================================================================
 
 main() {
-  echo "Milhouse: Simplified Autonomous Development Loop"
-  echo "═══════════════════════════════════════════════════════════════════"
+  show_header "Milhouse: Simplified Autonomous Development Loop" 212
   echo ""
-  echo "Mode:     $MODE"
-  echo "Workspace: $WORKSPACE"
+  show_info "Mode:      $MODE"
+  show_info "Workspace: $WORKSPACE"
   echo ""
   
   # Check prerequisites first

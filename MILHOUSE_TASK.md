@@ -17,7 +17,7 @@ Improve Milhouse’s polish and presentation in *this repo*.
 - [x] [X6Y7Z8] Add progress reporting: iteration number, criteria progress, status indicators
 - [x] [A9B0C1] Add help text: `--help` flag showing usage and options
 - [x] [D2E3F4] Add status indicators: use gum spinners for long operations (fallback to plain text)
-- [ ] [G5H6I7] Format output with gum style: consistent borders, colors, padding per `GUM_TUI_RULES.md` (fallback to plain text)
+- [x] [G5H6I7] Format output with gum style: consistent borders, colors, padding per `GUM_TUI_RULES.md` (fallback to plain text)
 
 ## Done
 When all checkboxes above are `[x]`, output:
