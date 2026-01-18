@@ -177,8 +177,17 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     -*)
-      echo "Unknown option: $1" >&2
-      echo "Use --help for usage information." >&2
+      show_error "Unknown option: $1" \
+        "This flag is not recognized.
+
+Valid options:
+  --once   Run a single iteration then stop
+  --loop   Run continuous loop until completion
+  --setup  Interactive setup
+  --help   Show usage information
+
+Fix: Check your command and try again, or run:
+  $0 --help"
       exit 1
       ;;
     *)
@@ -186,8 +195,16 @@ while [[ $# -gt 0 ]]; do
       if [[ -z "$WORKSPACE" ]]; then
         WORKSPACE="$1"
       else
-        echo "Error: Multiple workspace arguments provided." >&2
-        echo "Use --help for usage information." >&2
+        show_error "Multiple workspace arguments provided" \
+          "You specified: '$WORKSPACE' and '$1'
+
+Milhouse only accepts one workspace path.
+
+Fix: Use only one workspace argument:
+  $0 [--mode] /path/to/project
+
+Example:
+  $0 --loop ~/my-project"
         exit 1
       fi
       shift
@@ -611,7 +628,7 @@ log_rotation_reason() {
   local reason="${1:-}"
   
   if [[ -n "$reason" ]]; then
-    echo "🔄 Rotation triggered: $reason" >&2
+    show_info "Rotation triggered: $reason"
   fi
 }
 
@@ -848,7 +865,7 @@ log_gutter_reason() {
   local reason="${1:-}"
   
   if [[ -n "$reason" ]]; then
-    echo "🚨 Gutter detected: $reason" >&2
+    show_warning "Gutter detected: $reason"
   fi
 }
 
@@ -1020,9 +1037,10 @@ run_agent_iteration() {
   local exit_code=$?
   
   if [[ $exit_code -eq 0 ]]; then
-    echo "✅ Iteration $iteration completed" >&2
+    show_success "Iteration $iteration completed"
   else
-    echo "⚠️  Iteration $iteration exited with code $exit_code" >&2
+    show_warning "Iteration $iteration exited with code $exit_code"
+    show_info "Check $output_file for details. The loop will continue."
   fi
   
   return $exit_code
@@ -1421,8 +1439,8 @@ main() {
   
   # Check prerequisites first
   if ! check_prerequisites "$WORKSPACE"; then
-    echo "" >&2
-    echo "Fix the errors above and try again." >&2
+    echo ""
+    show_info "Fix the errors above and try again."
     exit 1
   fi
   
@@ -1449,7 +1467,18 @@ main() {
       fi
       ;;
     *)
-      echo "Error: Unknown mode: $MODE" >&2
+      show_error "Unknown mode: $MODE" \
+        "This mode is not recognized.
+
+Valid modes:
+  --once   Run a single iteration then stop
+  --loop   Run continuous loop until completion
+  --setup  Interactive setup
+
+Fix: Use a valid mode flag:
+  $0 --loop
+  $0 --once
+  $0 --setup"
       exit 1
       ;;
   esac
