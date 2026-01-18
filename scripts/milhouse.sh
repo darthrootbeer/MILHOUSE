@@ -1183,6 +1183,145 @@ run_milhouse_loop() {
 }
 
 # =============================================================================
+# PHASE 4: INTERACTIVE SETUP
+# =============================================================================
+
+# Available models for selection
+AVAILABLE_MODELS=(
+  "opus-4.5-thinking"
+  "opus-4"
+  "sonnet-4"
+  "sonnet-3.5"
+)
+
+# Interactive model selection
+# Returns: selected model via echo
+select_model_gum() {
+  local selected
+  selected=$(gum choose --header "Select AI model:" "${AVAILABLE_MODELS[@]}")
+  echo "$selected"
+}
+
+select_model_plain() {
+  echo "Select AI model:" >&2
+  local i=1
+  for model in "${AVAILABLE_MODELS[@]}"; do
+    echo "  $i) $model" >&2
+    ((i++))
+  done
+  read -rp "Choice [1-${#AVAILABLE_MODELS[@]}] (default: 1): " choice
+  choice="${choice:-1}"
+  # Validate and return
+  if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#AVAILABLE_MODELS[@]}" ]]; then
+    echo "${AVAILABLE_MODELS[$((choice - 1))]}"
+  else
+    echo "${AVAILABLE_MODELS[0]}"
+  fi
+}
+
+# Interactive max iterations input
+# Returns: max iterations via echo
+select_iterations_gum() {
+  local selected
+  selected=$(gum input --placeholder "20" --value "20" --header "Max iterations:")
+  echo "${selected:-20}"
+}
+
+select_iterations_plain() {
+  read -rp "Max iterations [default: 20]: " iterations
+  echo "${iterations:-20}"
+}
+
+# Interactive confirmation
+# Returns: 0 if confirmed, 1 if cancelled
+confirm_setup_gum() {
+  local model="$1"
+  local iterations="$2"
+  local workspace="$3"
+  
+  echo ""
+  gum style --border double --padding "0 2" --border-foreground 212 \
+    "Configuration Summary" \
+    "" \
+    "Model:      $model" \
+    "Max iter:   $iterations" \
+    "Workspace:  $workspace"
+  echo ""
+  
+  gum confirm "Start Milhouse with these settings?"
+}
+
+confirm_setup_plain() {
+  local model="$1"
+  local iterations="$2"
+  local workspace="$3"
+  
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo "Configuration Summary"
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "  Model:      $model"
+  echo "  Max iter:   $iterations"
+  echo "  Workspace:  $workspace"
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo ""
+  read -rp "Start Milhouse with these settings? [y/N]: " confirm
+  [[ "$confirm" =~ ^[Yy] ]]
+}
+
+# Main interactive setup function
+# Sets MODEL, MAX_ITERATIONS based on user input
+# Returns: 0 if setup complete, 1 if cancelled
+interactive_setup() {
+  local workspace="$1"
+  
+  echo ""
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --border rounded --padding "0 2" --border-foreground 12 \
+      "Milhouse Interactive Setup"
+    echo ""
+    
+    # Model selection
+    MODEL=$(select_model_gum)
+    
+    # Max iterations
+    MAX_ITERATIONS=$(select_iterations_gum)
+    
+    # Confirm
+    if ! confirm_setup_gum "$MODEL" "$MAX_ITERATIONS" "$workspace"; then
+      gum style --foreground 3 "Setup cancelled."
+      return 1
+    fi
+  else
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Milhouse Interactive Setup"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "(Install 'gum' for a better experience: https://github.com/charmbracelet/gum)"
+    echo ""
+    
+    # Model selection
+    MODEL=$(select_model_plain)
+    
+    # Max iterations
+    MAX_ITERATIONS=$(select_iterations_plain)
+    
+    # Confirm
+    if ! confirm_setup_plain "$MODEL" "$MAX_ITERATIONS" "$workspace"; then
+      echo "Setup cancelled."
+      return 1
+    fi
+  fi
+  
+  echo ""
+  echo "Starting Milhouse..."
+  echo ""
+  return 0
+}
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -1215,9 +1354,13 @@ main() {
       exit $?
       ;;
     setup)
-      echo "Setup mode (not yet implemented)"
-      echo "For now, ensure MILHOUSE_TASK.md exists and prerequisites are met."
-      exit 0
+      if interactive_setup "$WORKSPACE"; then
+        # After setup, run the loop with configured settings
+        run_milhouse_loop "$WORKSPACE" "$MAX_ITERATIONS" "$MODEL"
+        exit $?
+      else
+        exit 0
+      fi
       ;;
     *)
       echo "Error: Unknown mode: $MODE" >&2

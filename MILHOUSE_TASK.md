@@ -12,7 +12,7 @@ Improve Milhouse’s polish and presentation in *this repo*.
 
 ## Completion criteria (Phase 4: Polish)
 - [x] [O7P8Q9] Add gum detection: if `gum` is installed, use it; otherwise fall back to plain prompts
-- [ ] [R0S1T2] Implement interactive setup with gum: model selection, options, confirmation (plain fallback if gum missing)
+- [x] [R0S1T2] Implement interactive setup with gum: model selection, options, confirmation (plain fallback if gum missing)
 - [ ] [U3V4W5] Improve error messages per `UI_RULES.md` (clear, actionable, human-friendly)
 - [ ] [X6Y7Z8] Add progress reporting: iteration number, criteria progress, status indicators
 - [ ] [A9B0C1] Add help text: `--help` flag showing usage and options
