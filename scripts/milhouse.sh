@@ -31,6 +31,23 @@ ROTATION_INTERVAL="${MILHOUSE_ROTATION_INTERVAL:-5}"
 MAX_ITERATIONS="${MILHOUSE_MAX_ITERATIONS:-20}"
 
 # =============================================================================
+# GUM DETECTION (Phase 4: Polish)
+# =============================================================================
+
+# Check if gum is installed
+# Returns: 0 if gum is available, 1 if not
+check_gum() {
+  command -v gum &> /dev/null
+}
+
+# Set HAS_GUM flag based on gum availability
+# Called early in script initialization
+HAS_GUM="false"
+if check_gum; then
+  HAS_GUM="true"
+fi
+
+# =============================================================================
 # HELP TEXT
 # =============================================================================
 

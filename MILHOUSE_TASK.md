@@ -11,7 +11,7 @@ Improve Milhouse’s polish and presentation in *this repo*.
   - update **`TODO.md`** by changing the matching item’s `[ ]` → `[x]`
 
 ## Completion criteria (Phase 4: Polish)
-- [ ] [O7P8Q9] Add gum detection: if `gum` is installed, use it; otherwise fall back to plain prompts
+- [x] [O7P8Q9] Add gum detection: if `gum` is installed, use it; otherwise fall back to plain prompts
 - [ ] [R0S1T2] Implement interactive setup with gum: model selection, options, confirmation (plain fallback if gum missing)
 - [ ] [U3V4W5] Improve error messages per `UI_RULES.md` (clear, actionable, human-friendly)
 - [ ] [X6Y7Z8] Add progress reporting: iteration number, criteria progress, status indicators
