@@ -1063,14 +1063,24 @@ run_agent_iteration() {
   # Change to workspace
   cd "$workspace" || return 1
   
-  echo "🚀 Running iteration $iteration..." >&2
-  echo "   Model: $model" >&2
-  echo "   Output: $output_file" >&2
-  echo "" >&2
+  show_info "Running iteration $iteration..."
+  show_info "Model: $model"
+  show_info "Output: $output_file"
+  echo ""
   
-  # Execute and capture output (prompt passed as a single argument)
-  cursor-agent -p --force --model "$model" "$prompt" > "$output_file" 2>&1
-  local exit_code=$?
+  # Execute with spinner if gum available, plain message otherwise
+  local exit_code
+  if [[ "$HAS_GUM" == "true" ]]; then
+    # Use gum spin to show spinner during agent execution
+    # Note: gum spin runs command and shows spinner, output goes to file
+    gum spin --spinner dot --title "Agent working on iteration $iteration..." -- \
+      sh -c "cursor-agent -p --force --model \"$model\" \"\$1\" > \"$output_file\" 2>&1" -- "$prompt"
+    exit_code=$?
+  else
+    echo "Agent working on iteration $iteration..."
+    cursor-agent -p --force --model "$model" "$prompt" > "$output_file" 2>&1
+    exit_code=$?
+  fi
   
   if [[ $exit_code -eq 0 ]]; then
     show_success "Iteration $iteration completed"
