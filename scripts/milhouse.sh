@@ -112,6 +112,25 @@ show_info() {
   fi
 }
 
+# Display progress information with formatting
+# Args: iteration, done_count, total, remaining
+show_progress() {
+  local iteration="$1"
+  local done_count="$2"
+  local total="$3"
+  local remaining="$4"
+  
+  local progress_text="Iteration $iteration: $done_count/$total criteria complete ($remaining remaining)"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --border single --padding "0 1" --border-foreground 8 "$progress_text"
+  else
+    echo "┌──────────────────────────────────────────────────────────────────┐"
+    printf "│ %-66s │\n" "$progress_text"
+    echo "└──────────────────────────────────────────────────────────────────┘"
+  fi
+}
+
 # =============================================================================
 # HELP TEXT
 # =============================================================================
@@ -1076,8 +1095,10 @@ run_single_iteration() {
   local counts
   counts=$(read_task_file "$workspace")
   IFS=':' read -r total done_count remaining <<< "$counts"
+  local iteration
+  iteration=$(get_iteration "$workspace")
   
-  echo "Progress: $done_count / $total criteria complete ($remaining remaining)"
+  show_progress "$((iteration + 1))" "$done_count" "$total" "$remaining"
   echo ""
   
   # Commit any uncommitted work first
@@ -1137,14 +1158,14 @@ run_single_iteration() {
   echo ""
   
   if [[ "$task_status" == "COMPLETE" ]]; then
-    echo "🎉 Task completed in single iteration!"
+    show_success "Task completed in single iteration!"
     echo ""
-    echo "All criteria are checked. You're done!"
+    show_progress "$iteration" "$done_count" "$total" "$remaining"
     return 0
   else
-    echo "Progress: $done_count / $total criteria complete ($remaining remaining)"
+    show_progress "$iteration" "$done_count" "$total" "$remaining"
     echo ""
-    echo "Review the changes and run again or proceed to full loop."
+    show_info "Review the changes and run again or proceed to full loop."
     return 1
   fi
 }
@@ -1196,9 +1217,16 @@ run_milhouse_loop() {
     # Increment iteration
     iteration=$(increment_iteration "$workspace")
     
+    # Show progress at start of iteration
+    local counts
+    counts=$(read_task_file "$workspace")
+    IFS=':' read -r total done_count remaining <<< "$counts"
+    
     echo "═══════════════════════════════════════════════════════════════════"
     echo "Iteration $iteration / $max_iterations"
     echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    show_progress "$iteration" "$done_count" "$total" "$remaining"
     echo ""
     
     local start_time
@@ -1273,15 +1301,15 @@ run_milhouse_loop() {
   echo ""
   task_status=$(check_task_complete "$workspace")
   if [[ "$task_status" == "COMPLETE" ]]; then
-    echo "Task is complete!"
+    show_success "Task is complete!"
     return 0
   else
     local counts
     counts=$(read_task_file "$workspace")
     IFS=':' read -r total done_count remaining <<< "$counts"
-    echo "Progress: $done_count / $total criteria complete ($remaining remaining)"
+    show_progress "$max_iterations" "$done_count" "$total" "$remaining"
     echo ""
-    echo "Review progress and continue or adjust task."
+    show_info "Review progress and continue or adjust task."
     return 1
   fi
 }
