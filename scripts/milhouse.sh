@@ -48,6 +48,71 @@ if check_gum; then
 fi
 
 # =============================================================================
+# OUTPUT HELPERS (Phase 4: Polish)
+# =============================================================================
+
+# Display an error message with formatting
+# Args: main_message, details (optional)
+show_error() {
+  local message="$1"
+  local details="${2:-}"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    if [[ -n "$details" ]]; then
+      gum style --foreground 1 --border double --padding "0 1" \
+        "Error: $message" "" "$details"
+    else
+      gum style --foreground 1 --border double --padding "0 1" \
+        "Error: $message"
+    fi
+  else
+    echo -e "\033[31m═══════════════════════════════════════════════════════════════════\033[0m" >&2
+    echo -e "\033[31mError: $message\033[0m" >&2
+    if [[ -n "$details" ]]; then
+      echo "" >&2
+      echo -e "$details" >&2
+    fi
+    echo -e "\033[31m═══════════════════════════════════════════════════════════════════\033[0m" >&2
+  fi
+}
+
+# Display a success message with formatting
+# Args: message
+show_success() {
+  local message="$1"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --foreground 10 --bold "✓ $message"
+  else
+    echo -e "\033[32m✓ $message\033[0m"
+  fi
+}
+
+# Display a warning message with formatting
+# Args: message
+show_warning() {
+  local message="$1"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --foreground 3 "⚠ $message"
+  else
+    echo -e "\033[33m⚠ $message\033[0m"
+  fi
+}
+
+# Display an info message with formatting
+# Args: message
+show_info() {
+  local message="$1"
+  
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --foreground 12 "$message"
+  else
+    echo -e "\033[34m$message\033[0m"
+  fi
+}
+
+# =============================================================================
 # HELP TEXT
 # =============================================================================
 
@@ -800,22 +865,43 @@ check_prerequisites() {
   
   # Check git repository
   if ! git -C "$workspace" rev-parse --git-dir > /dev/null 2>&1; then
-    echo "Error: Not a git repository: $workspace" >&2
-    echo "  Run: git init" >&2
+    show_error "Not a git repository" \
+      "Location: $workspace
+
+Milhouse requires a git repository for state tracking.
+
+Fix: Run the following command in your project:
+  cd \"$workspace\" && git init"
     errors=$((errors + 1))
   fi
   
   # Check cursor-agent
   if ! command -v cursor-agent > /dev/null 2>&1; then
-    echo "Error: cursor-agent not found in PATH" >&2
-    echo "  Install cursor-agent CLI and ensure it's in your PATH" >&2
+    show_error "cursor-agent CLI not found" \
+      "Milhouse requires cursor-agent to run AI iterations.
+
+Fix: Install cursor-agent and ensure it's in your PATH.
+  1. Install: npm install -g cursor-agent
+  2. Verify: cursor-agent --version"
     errors=$((errors + 1))
   fi
   
   # Check task file
   if [[ ! -f "$workspace/MILHOUSE_TASK.md" ]]; then
-    echo "Error: MILHOUSE_TASK.md not found: $workspace/MILHOUSE_TASK.md" >&2
-    echo "  Create MILHOUSE_TASK.md with your task and completion criteria" >&2
+    show_error "Task file not found" \
+      "Expected: $workspace/MILHOUSE_TASK.md
+
+Milhouse needs a task file with completion criteria to work on.
+
+Fix: Create MILHOUSE_TASK.md with:
+  - A description of what you want built
+  - Completion criteria as checkboxes: - [ ] Criterion 1
+
+Example:
+  # My Task
+  ## Completion criteria
+  - [ ] Create database schema
+  - [ ] Implement API endpoints"
     errors=$((errors + 1))
   fi
   
