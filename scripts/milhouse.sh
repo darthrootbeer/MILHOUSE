@@ -123,7 +123,7 @@ show_progress() {
   local progress_text="Iteration $iteration: $done_count/$total criteria complete ($remaining remaining)"
   
   if [[ "$HAS_GUM" == "true" ]]; then
-    gum style --border single --padding "0 1" --border-foreground 8 "$progress_text"
+    gum style --border normal --padding "0 1" --border-foreground 8 "$progress_text"
   else
     echo "┌──────────────────────────────────────────────────────────────────┐"
     printf "│ %-66s │\n" "$progress_text"
@@ -152,12 +152,204 @@ show_section() {
   local title="$1"
   
   if [[ "$HAS_GUM" == "true" ]]; then
-    gum style --border single --padding "0 1" --border-foreground 8 "$title"
+    gum style --border normal --padding "0 1" --border-foreground 8 "$title"
   else
     echo "┌───────────────────────────────────────────────────────────────────┐"
     printf "│ %-65s │\n" "$title"
     echo "└───────────────────────────────────────────────────────────────────┘"
   fi
+}
+
+# =============================================================================
+# TODO.md → MILHOUSE_TASK.md WORKFLOW (Recommendation #3)
+# =============================================================================
+
+# Cross-platform sed -i helper
+sedi() {
+  if [[ "${OSTYPE:-}" == "darwin"* ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
+# List unchecked TODO items from TODO.md (best-effort).
+# Output: one item per line (the full TODO line).
+list_unchecked_todo_items() {
+  local workspace="$1"
+  local todo_file="$workspace/TODO.md"
+  
+  if [[ ! -f "$todo_file" ]]; then
+    return 1
+  fi
+  
+  # Only count real list-item checkboxes (not prose).
+  grep -E '^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+' "$todo_file" || true
+}
+
+# Create MILHOUSE_TASK.md from selected TODO.md lines.
+# Args: workspace, selected_lines (newline-separated)
+create_task_from_todo_selection() {
+  local workspace="$1"
+  local selected_lines="$2"
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  
+  if [[ -z "$selected_lines" ]]; then
+    show_warning "No TODO items selected. Not creating MILHOUSE_TASK.md."
+    return 1
+  fi
+  
+  {
+    echo "# Milhouse task run"
+    echo ""
+    echo "## Goal"
+    echo "Complete the selected TODO items from this repo."
+    echo ""
+    echo "## Completion criteria"
+    # Convert TODO lines into plain Milhouse checklist items.
+    # Example TODO line:
+    # - [ ] [O7P8Q9](TODO/O7P8Q9.md) - Add gum detection...
+    # becomes:
+    # - [ ] [O7P8Q9](TODO/O7P8Q9.md) - Add gum detection...
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local item
+      item="$(echo "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+//')"
+      echo "- [ ] $item"
+    done <<< "$selected_lines"
+    echo ""
+    echo "## Done"
+    echo "When all checkboxes above are \`[x]\`, output:"
+    echo "\`<milhouse>COMPLETE</milhouse>\`"
+    echo ""
+  } > "$task_file"
+  
+  show_success "Created MILHOUSE_TASK.md from TODO.md selection"
+  return 0
+}
+
+# If a checkbox item is marked complete in MILHOUSE_TASK.md, mark it complete in TODO.md too.
+# Matching is primarily by stable id token: [A1B2C3], [O7P8Q9], etc.
+sync_task_progress_to_todo() {
+  local workspace="$1"
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  local todo_file="$workspace/TODO.md"
+  
+  [[ -f "$task_file" ]] || return 0
+  [[ -f "$todo_file" ]] || return 0
+  
+  # Extract completed IDs from MILHOUSE_TASK.md:
+  # - [x] [ID] ...
+  local ids
+  ids="$(grep -E '^[[:space:]]*[-*][[:space:]]+\[x\][[:space:]]+\[[A-Za-z0-9]+\]' "$task_file" \
+    | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[x\][[:space:]]+\[([A-Za-z0-9]+)\].*$/\1/' \
+    | sort -u)"
+  
+  if [[ -z "$ids" ]]; then
+    return 0
+  fi
+  
+  # For each completed ID, flip the matching TODO line to [x].
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    # Example TODO line:
+    # - [ ] [ID](...) - ...
+    # becomes:
+    # - [x] [ID](...) - ...
+    sedi -E "s/^([[:space:]]*[-*][[:space:]]*)\\[ \\] ([[:space:]]*\\[${id}\\])/\1[x] \2/" "$todo_file" || true
+  done <<< "$ids"
+}
+
+# Ensure MILHOUSE_TASK.md exists. If missing, ask what Milhouse should do.
+# For your preference, this only runs when the task file is missing.
+ensure_task_file() {
+  local workspace="$1"
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  
+  if [[ -f "$task_file" ]]; then
+    return 0
+  fi
+  
+  show_header "Milhouse setup: choose what to work on" 12
+  echo ""
+  
+  local choice=""
+  if [[ "$HAS_GUM" == "true" ]]; then
+    choice="$(gum choose --header "What should Milhouse work on?" \
+      "Use TODO.md (pick tasks)" \
+      "Custom goal (write a new task)")"
+  else
+    echo "What should Milhouse work on?"
+    echo "  1) Use TODO.md (pick tasks)"
+    echo "  2) Custom goal (write a new task)"
+    read -rp "Choice [1-2]: " choice_num
+    if [[ "$choice_num" == "1" ]]; then
+      choice="Use TODO.md (pick tasks)"
+    else
+      choice="Custom goal (write a new task)"
+    fi
+  fi
+  
+  if [[ "$choice" == "Use TODO.md (pick tasks)" ]]; then
+    local items
+    items="$(list_unchecked_todo_items "$workspace")"
+    if [[ -z "$items" ]]; then
+      show_error "No unchecked TODO items found" \
+        "Milhouse looked for unchecked items in:
+  $workspace/TODO.md
+
+Fix: Add tasks in TODO.md using this format:
+  - [ ] My next task"
+      return 1
+    fi
+    
+    local selected=""
+    if [[ "$HAS_GUM" == "true" ]]; then
+      # Multi-select checklist
+      selected="$(printf "%s\n" "$items" | gum choose --no-limit --header "Select TODO items for this run:")"
+    else
+      show_info "Paste the TODO lines you want Milhouse to work on (end with an empty line):"
+      local line
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && break
+        selected="${selected}${line}"$'\n'
+      done
+    fi
+    
+    create_task_from_todo_selection "$workspace" "$selected"
+    return $?
+  fi
+  
+  # Custom goal path (minimal scaffold; user can refine later).
+  local goal=""
+  if [[ "$HAS_GUM" == "true" ]]; then
+    goal="$(gum input --header "Describe what Milhouse should accomplish:" --placeholder "e.g., Improve the README and add a test task example")"
+  else
+    read -rp "Describe what Milhouse should accomplish: " goal
+  fi
+  
+  if [[ -z "$goal" ]]; then
+    show_warning "No goal provided. Not creating MILHOUSE_TASK.md."
+    return 1
+  fi
+  
+  {
+    echo "# Milhouse task run"
+    echo ""
+    echo "## Goal"
+    echo "$goal"
+    echo ""
+    echo "## Completion criteria"
+    echo "- [ ] Define the concrete completion criteria for this goal"
+    echo ""
+    echo "## Done"
+    echo "When all checkboxes above are \`[x]\`, output:"
+    echo "\`<milhouse>COMPLETE</milhouse>\`"
+    echo ""
+  } > "$task_file"
+  
+  show_success "Created MILHOUSE_TASK.md (custom goal scaffold)"
+  return 0
 }
 
 # =============================================================================
@@ -697,6 +889,47 @@ log_rotation_reason() {
   fi
 }
 
+# Context “health” indicator (green/yellow/red) to show how close we are to a refresh.
+# This is a proxy for “tokens left”, based on Milhouse’s heuristics.
+# Args: duration_seconds, file_count, commit_count, iteration, rotate_interval
+get_context_health_emoji() {
+  local duration_seconds="${1:-0}"
+  local file_count="${2:-0}"
+  local commit_count="${3:-0}"
+  local iteration="${4:-0}"
+  local rotate_interval="${5:-5}"
+  
+  local time_threshold=1800   # 30 min
+  local file_threshold=50
+  local commit_threshold=10
+  
+  # Ratios in percent (0-100+)
+  local time_pct=$(( duration_seconds * 100 / time_threshold ))
+  local file_pct=$(( file_count * 100 / file_threshold ))
+  local commit_pct=$(( commit_count * 100 / commit_threshold ))
+  
+  local iter_pos=0
+  local iter_pct=0
+  if [[ "$rotate_interval" -gt 0 ]]; then
+    iter_pos=$(( ( (iteration - 1) % rotate_interval ) + 1 ))
+    iter_pct=$(( iter_pos * 100 / rotate_interval ))
+  fi
+  
+  # Max pct of all signals
+  local max_pct=$time_pct
+  if [[ $file_pct -gt $max_pct ]]; then max_pct=$file_pct; fi
+  if [[ $commit_pct -gt $max_pct ]]; then max_pct=$commit_pct; fi
+  if [[ $iter_pct -gt $max_pct ]]; then max_pct=$iter_pct; fi
+  
+  if [[ $max_pct -lt 60 ]]; then
+    echo "🟢"
+  elif [[ $max_pct -lt 85 ]]; then
+    echo "🟡"
+  else
+    echo "🔴"
+  fi
+}
+
 # =============================================================================
 # PHASE 3: GUTTER DETECTION
 # =============================================================================
@@ -943,6 +1176,7 @@ log_gutter_reason() {
 # Returns: 0 if all good, 1 if any missing
 check_prerequisites() {
   local workspace="$1"
+  local require_task_file="${2:-1}"
   local errors=0
   
   # Check git repository
@@ -969,7 +1203,7 @@ Fix: Install cursor-agent and ensure it's in your PATH.
   fi
   
   # Check task file
-  if [[ ! -f "$workspace/MILHOUSE_TASK.md" ]]; then
+  if [[ "$require_task_file" == "1" ]] && [[ ! -f "$workspace/MILHOUSE_TASK.md" ]]; then
     show_error "Task file not found" \
       "Expected: $workspace/MILHOUSE_TASK.md
 
@@ -1091,11 +1325,23 @@ run_agent_iteration() {
   
   # Change to workspace
   cd "$workspace" || return 1
+  mkdir -p "$workspace/.milhouse"
   
   show_info "Running iteration $iteration..."
   show_info "Model: $model"
   show_info "Output: $output_file"
   echo ""
+  
+  # Write a header immediately so “tail -f” shows something right away.
+  {
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Milhouse agent output"
+    echo "Iteration: $iteration"
+    echo "Model: $model"
+    echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+  } > "$output_file"
   
   # Execute with spinner if gum available, plain message otherwise
   local exit_code
@@ -1103,11 +1349,11 @@ run_agent_iteration() {
     # Use gum spin to show spinner during agent execution
     # Note: gum spin runs command and shows spinner, output goes to file
     gum spin --spinner dot --title "Agent working on iteration $iteration..." -- \
-      sh -c "cursor-agent -p --force --model \"$model\" \"\$1\" > \"$output_file\" 2>&1" -- "$prompt"
+      sh -c "cursor-agent -p --force --model \"$model\" \"\$1\" >> \"$output_file\" 2>&1" -- "$prompt"
     exit_code=$?
   else
     echo "Agent working on iteration $iteration..."
-    cursor-agent -p --force --model "$model" "$prompt" > "$output_file" 2>&1
+    cursor-agent -p --force --model "$model" "$prompt" >> "$output_file" 2>&1
     exit_code=$?
   fi
   
@@ -1175,8 +1421,15 @@ run_single_iteration() {
   local head_start=""
   head_start=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
   
+  echo "Follow along:"
+  echo "  tail -f $output_file"
+  echo ""
+  
   run_agent_iteration "$workspace" "$iteration" "$model"
   local exit_code=$?
+  
+  # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
+  sync_task_progress_to_todo "$workspace"
   
   local duration_seconds
   duration_seconds=$(calculate_iteration_duration "$start_time")
@@ -1184,6 +1437,10 @@ run_single_iteration() {
   commits_in_iteration=$(count_commits_in_iteration "$commits_start" "$workspace")
   local files_changed
   files_changed=$(count_files_changed_since_commit "$workspace" "$head_start")
+  
+  local health
+  health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
+  show_info "Context health: $health"
   
   # Rotation reporting (Phase 2): tell the operator why we'd rotate.
   local rotation_reason=""
@@ -1261,6 +1518,9 @@ run_milhouse_loop() {
   
   echo "🚀 Starting Milhouse loop..."
   echo ""
+  echo "Follow along:"
+  echo "  tail -f $output_file"
+  echo ""
   
   # Main loop
   while [[ $iteration -lt $max_iterations ]]; do
@@ -1288,12 +1548,19 @@ run_milhouse_loop() {
     run_agent_iteration "$workspace" "$iteration" "$model"
     local exit_code=$?
     
+    # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
+    sync_task_progress_to_todo "$workspace"
+    
     local duration_seconds
     duration_seconds=$(calculate_iteration_duration "$start_time")
     local commits_in_iteration
     commits_in_iteration=$(count_commits_in_iteration "$commits_start" "$workspace")
     local files_changed
     files_changed=$(count_files_changed_since_commit "$workspace" "$head_start")
+    
+    local health
+    health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
+    show_info "Context health: $health"
     
     # Check completion
     task_status=$(check_task_complete "$workspace")
@@ -1500,7 +1767,8 @@ main() {
   echo ""
   
   # Check prerequisites first
-  if ! check_prerequisites "$WORKSPACE"; then
+  # Allow missing MILHOUSE_TASK.md: we can create it interactively.
+  if ! check_prerequisites "$WORKSPACE" 0; then
     echo ""
     show_info "Fix the errors above and try again."
     exit 1
@@ -1508,6 +1776,12 @@ main() {
   
   # Initialize state directory
   init_state "$WORKSPACE"
+  
+  # If task file is missing, ask what to work on (TODO.md picker or custom goal).
+  if ! ensure_task_file "$WORKSPACE"; then
+    show_warning "No task selected. Exiting."
+    exit 0
+  fi
   
   # Execute based on mode
   case "$MODE" in
