@@ -979,6 +979,58 @@ get_context_health_emoji() {
   fi
 }
 
+# Return a single “token budget” status line (emoji + estimates + guidance).
+# This is heuristic-based (Milhouse does not parse exact token counts).
+# Args: duration_seconds, file_count, commit_count, iteration, rotate_interval
+get_token_budget_status_line() {
+  local duration_seconds="${1:-0}"
+  local file_count="${2:-0}"
+  local commit_count="${3:-0}"
+  local iteration="${4:-0}"
+  local rotate_interval="${5:-5}"
+  
+  local time_threshold=1800   # 30 min
+  local file_threshold=50
+  local commit_threshold=10
+  local token_capacity=80000  # Ralph-ish ballpark; heuristic display only
+  
+  local time_pct=$(( duration_seconds * 100 / time_threshold ))
+  local file_pct=$(( file_count * 100 / file_threshold ))
+  local commit_pct=$(( commit_count * 100 / commit_threshold ))
+  
+  local iter_pos=0
+  local iter_pct=0
+  if [[ "$rotate_interval" -gt 0 ]]; then
+    iter_pos=$(( ( (iteration - 1) % rotate_interval ) + 1 ))
+    iter_pct=$(( iter_pos * 100 / rotate_interval ))
+  fi
+  
+  local max_pct=$time_pct
+  if [[ $file_pct -gt $max_pct ]]; then max_pct=$file_pct; fi
+  if [[ $commit_pct -gt $max_pct ]]; then max_pct=$commit_pct; fi
+  if [[ $iter_pct -gt $max_pct ]]; then max_pct=$iter_pct; fi
+  if [[ $max_pct -lt 0 ]]; then max_pct=0; fi
+  if [[ $max_pct -gt 100 ]]; then max_pct=100; fi
+  
+  local emoji
+  emoji="$(get_context_health_emoji "$duration_seconds" "$file_count" "$commit_count" "$iteration" "$rotate_interval")"
+  
+  local used=$(( token_capacity * max_pct / 100 ))
+  local remaining=$(( token_capacity - used ))
+  if [[ $remaining -lt 0 ]]; then remaining=0; fi
+  
+  local note=""
+  if [[ $max_pct -ge 85 ]]; then
+    note="token reset will occur soon (refresh threshold approaching)"
+  elif [[ $max_pct -ge 60 ]]; then
+    note="token budget mid-way (keep changes focused)"
+  else
+    note="token budget healthy"
+  fi
+  
+  echo "$emoji Tokens (est): used ~$used/$token_capacity (~${max_pct}%), remaining ~$remaining — $note"
+}
+
 # =============================================================================
 # PHASE 3: GUTTER DETECTION
 # =============================================================================
@@ -1388,6 +1440,7 @@ run_agent_iteration() {
   log_out "$workspace" "Model: $model"
   log_out "$workspace" "Prompt length: ${#prompt} chars"
   log_out "$workspace" "Milhouse will append agent output below."
+  log_out "$workspace" "Agent output format: stream-json (partial streaming enabled)"
   
   # Execute the agent.
   #
@@ -1395,7 +1448,12 @@ run_agent_iteration() {
   # In practice, spinner wrappers can cause “Aborting operation...” or apparent hangs.
   # The “Follow along” tail command is the preferred live view.
   echo "Agent working on iteration $iteration..."
-  cursor-agent -p --force --model "$model" "$prompt" >> "$output_file" 2>&1
+  cursor-agent -p --force \
+    --output-format stream-json \
+    --stream-partial-output \
+    --workspace "$workspace" \
+    --model "$model" \
+    "$prompt" >> "$output_file" 2>&1
   local exit_code=$?
   
   if [[ $exit_code -eq 0 ]]; then
@@ -1493,8 +1551,10 @@ run_single_iteration() {
   
   local health
   health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
+  local token_line
+  token_line=$(get_token_budget_status_line "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
   show_info "Context health: $health"
-  log_out "$workspace" "Context health: $health"
+  log_out "$workspace" "$token_line"
   
   # Rotation reporting (Phase 2): tell the operator why we'd rotate.
   local rotation_reason=""
@@ -1629,8 +1689,10 @@ run_milhouse_loop() {
     
     local health
     health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
+    local token_line
+    token_line=$(get_token_budget_status_line "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
     show_info "Context health: $health"
-    log_out "$workspace" "Context health: $health"
+    log_out "$workspace" "$token_line"
     
     # Check completion
     task_status=$(check_task_complete "$workspace")
