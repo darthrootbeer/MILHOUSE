@@ -187,6 +187,59 @@ list_unchecked_todo_items() {
   grep -E '^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+' "$todo_file" || true
 }
 
+# Build a short, readable menu label for a TODO line.
+# Output format: "<first ~64 chars of description> [ABC123]"
+todo_menu_label_for_line() {
+  local line="$1"
+  local id=""
+  id="$(echo "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+\[([A-Za-z0-9]+)\].*$/\1/' 2>/dev/null || true)"
+  if [[ -z "$id" ]] || [[ "$id" == "$line" ]]; then
+    id=""
+  fi
+
+  local desc
+  desc="$(echo "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+//; s/^[[:space:]]*\[[A-Za-z0-9]+\]\([^)]*\)[[:space:]]*-[[:space:]]*//' 2>/dev/null || true)"
+  if [[ -z "$desc" ]]; then
+    desc="$line"
+  fi
+
+  # Truncate for quick scanning.
+  local max=64
+  local short="$desc"
+  if [[ ${#short} -gt $max ]]; then
+    short="$(printf "%.${max}s" "$short")…"
+  fi
+
+  if [[ -n "$id" ]]; then
+    echo "$short [$id]"
+  else
+    echo "$short"
+  fi
+}
+
+# Given a list of TODO lines and selected menu labels, return original TODO lines (newline-separated).
+todo_lines_from_selected_labels() {
+  local all_lines="$1"
+  local selected_labels="$2"
+  local out=""
+
+  while IFS= read -r label; do
+    [[ -z "$label" ]] && continue
+    local id
+    id="$(echo "$label" | sed -E 's/.*\[([A-Za-z0-9]+)\][[:space:]]*$/\1/' 2>/dev/null || true)"
+    if [[ -z "$id" ]] || [[ "$id" == "$label" ]]; then
+      continue
+    fi
+    local match
+    match="$(printf "%s\n" "$all_lines" | grep -E "^[[:space:]]*[-*][[:space:]]+\\[ \\][[:space:]]+\\[${id}\\]" | head -n 1 || true)"
+    if [[ -n "$match" ]]; then
+      out="${out}${match}"$'\n'
+    fi
+  done <<< "$selected_labels"
+
+  printf "%s" "$out"
+}
+
 # Create MILHOUSE_TASK.md from selected TODO.md lines.
 # Args: workspace, selected_lines (newline-separated)
 create_task_from_todo_selection() {
@@ -305,8 +358,15 @@ Fix: Add tasks in TODO.md using this format:
     
     local selected=""
     if [[ "$HAS_GUM" == "true" ]]; then
-      # Multi-select checklist
-      selected="$(printf "%s\n" "$items" | gum choose --no-limit --header "Select TODO items for this run:")"
+      # Multi-select checklist (show short, readable labels; map back to real lines)
+      local menu
+      menu="$(while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        todo_menu_label_for_line "$line"
+      done <<< "$items")"
+      local picked
+      picked="$(printf "%s\n" "$menu" | gum choose --no-limit --header "Select TODO items for this run:")"
+      selected="$(todo_lines_from_selected_labels "$items" "$picked")"
     else
       show_info "Paste the TODO lines you want Milhouse to work on (end with an empty line):"
       local line
