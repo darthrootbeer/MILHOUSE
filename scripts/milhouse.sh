@@ -365,13 +365,89 @@ init_out_log() {
   if [[ ! -f "$output_file" ]]; then
     {
       echo "═══════════════════════════════════════════════════════════════════"
-      echo "Milhouse run log (Milhouse + agent output)"
+      echo "Milhouse run log (human-readable)"
       echo "Workspace: $workspace"
       echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
       echo "═══════════════════════════════════════════════════════════════════"
+      echo "Note: raw agent stream is also saved to: .milhouse/out.stream.jsonl"
       echo ""
     } > "$output_file"
   fi
+}
+
+# Find a python interpreter (prefer python3).
+detect_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+# Convert cursor-agent stream-json into readable log lines.
+# Reads from stdin; writes cleaned text to stdout.
+clean_cursor_agent_stream() {
+  local python_bin
+  python_bin="$(detect_python)"
+  if [[ -z "$python_bin" ]]; then
+    # No python available; passthrough raw stream.
+    cat
+    return 0
+  fi
+
+  "$python_bin" -c '
+import sys, json
+
+last = ""
+
+def emit(s: str):
+  global last
+  s = (s or "").strip("\n")
+  if not s:
+    return
+  if s == last:
+    return
+  last = s
+  sys.stdout.write(s)
+  if not s.endswith("\n"):
+    sys.stdout.write("\n")
+  sys.stdout.flush()
+
+for line in sys.stdin:
+  raw = line.rstrip("\n")
+  if not raw.strip():
+    continue
+  try:
+    obj = json.loads(raw)
+  except Exception:
+    # Keep non-JSON lines (often useful errors), but avoid spammy whitespace.
+    emit(raw)
+    continue
+
+  t = obj.get("type")
+  if t != "assistant":
+    continue
+
+  # Heuristic: only print the "final" assistant message, not partial fragments.
+  # The partial fragments tend to be tiny; the final tends to include model_call_id.
+  if not obj.get("model_call_id"):
+    continue
+
+  msg = obj.get("message") or {}
+  content = msg.get("content") or []
+  parts = []
+  for c in content:
+    if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str):
+      parts.append(c["text"])
+  text = "".join(parts).strip()
+  if text:
+    emit(text)
+' 2>/dev/null
 }
 
 # Append a timestamped line to out.txt.
@@ -1419,6 +1495,7 @@ run_agent_iteration() {
   local iteration="$2"
   local model="${3:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
+  local raw_stream_file="$workspace/.milhouse/out.stream.jsonl"
   
   # Build prompt
   local prompt
@@ -1439,8 +1516,8 @@ run_agent_iteration() {
   log_out "$workspace" "Mode: agent-run"
   log_out "$workspace" "Model: $model"
   log_out "$workspace" "Prompt length: ${#prompt} chars"
-  log_out "$workspace" "Milhouse will append agent output below."
-  log_out "$workspace" "Agent output format: stream-json (partial streaming enabled)"
+  log_out "$workspace" "Milhouse will append cleaned agent output below."
+  log_out "$workspace" "Raw agent stream: $raw_stream_file"
   
   # Execute the agent.
   #
@@ -1448,12 +1525,16 @@ run_agent_iteration() {
   # In practice, spinner wrappers can cause “Aborting operation...” or apparent hangs.
   # The “Follow along” tail command is the preferred live view.
   echo "Agent working on iteration $iteration..."
-  cursor-agent -p --force \
-    --output-format stream-json \
-    --stream-partial-output \
-    --workspace "$workspace" \
-    --model "$model" \
-    "$prompt" >> "$output_file" 2>&1
+  {
+    cursor-agent -p --force \
+      --output-format stream-json \
+      --stream-partial-output \
+      --workspace "$workspace" \
+      --model "$model" \
+      "$prompt" 2>&1 \
+      | tee -a "$raw_stream_file" \
+      | clean_cursor_agent_stream >> "$output_file"
+  }
   local exit_code=$?
   
   if [[ $exit_code -eq 0 ]]; then

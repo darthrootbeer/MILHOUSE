@@ -50,9 +50,9 @@
 ## Testing & Documentation
 
 - [ ] [J8K9L0](TODO/J8K9L0.md) - Create test task file: MILHOUSE_TASK_EXAMPLE.md with sample checkboxes
-- [ ] [M1N2O3](TODO/M1N2O3.md) - Test Phase 1: verify basic loop works with simple task
-- [ ] [P4Q5R6](TODO/P4Q5R6.md) - Test Phase 2: verify rotation triggers work correctly
-- [ ] [S7T8U9](TODO/S7T8U9.md) - Test Phase 3: verify gutter detection catches stuck scenarios
-- [ ] [V0W1X2](TODO/V0W1X2.md) - Test Phase 4: verify gum UI and fallback both work
+- [x] [M1N2O3](TODO/M1N2O3.md) - Test Phase 1: verify basic loop works with simple task
+- [x] [P4Q5R6](TODO/P4Q5R6.md) - Test Phase 2: verify rotation triggers work correctly
+- [x] [S7T8U9](TODO/S7T8U9.md) - Test Phase 3: verify gutter detection catches stuck scenarios
+- [x] [V0W1X2](TODO/V0W1X2.md) - Test Phase 4: verify gum UI and fallback both work
 - [ ] [Y3Z4A5](TODO/Y3Z4A5.md) - Create usage documentation: README section on how to use milhouse.sh
 - [ ] [B6C7D8](TODO/B6C7D8.md) - Document heuristics: explain rotation thresholds and how to tune them
