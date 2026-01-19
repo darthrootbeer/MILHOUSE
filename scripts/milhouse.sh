@@ -187,6 +187,87 @@ list_unchecked_todo_items() {
   grep -E '^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+' "$todo_file" || true
 }
 
+# --- Task announcements (MILHOUSE_TASK.md) -----------------------------------
+
+trim_one_line() {
+  local s="$1"
+  # Collapse whitespace + trim.
+  s="$(printf "%s" "$s" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ +//; s/ +$//')"
+  printf "%s" "$s"
+}
+
+# Return first unchecked checkbox line (without "- [ ]") as a single line.
+get_first_unchecked_task_one_liner() {
+  local workspace="$1"
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  [[ -f "$task_file" ]] || { echo ""; return 1; }
+  local line
+  line="$(grep -E '^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+' "$task_file" | head -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    echo ""
+    return 1
+  fi
+  line="$(printf "%s" "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+//')"
+  trim_one_line "$line"
+}
+
+# List IDs for a given state in MILHOUSE_TASK.md ("x" or " ").
+list_task_ids_by_state() {
+  local workspace="$1"
+  local state="$2" # "x" or " "
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  [[ -f "$task_file" ]] || { echo ""; return 0; }
+  if [[ "$state" == "x" ]]; then
+    grep -E '^[[:space:]]*[-*][[:space:]]+\[x\][[:space:]]+\[[A-Za-z0-9]+\]' "$task_file" \
+      | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[x\][[:space:]]+\[([A-Za-z0-9]+)\].*$/\1/' \
+      | sort -u || true
+  else
+    grep -E '^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+\[[A-Za-z0-9]+\]' "$task_file" \
+      | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[ \][[:space:]]+\[([A-Za-z0-9]+)\].*$/\1/' \
+      | sort -u || true
+  fi
+}
+
+get_task_one_liner_for_id() {
+  local workspace="$1"
+  local id="$2"
+  local task_file="$workspace/MILHOUSE_TASK.md"
+  [[ -f "$task_file" ]] || { echo ""; return 1; }
+  local line
+  line="$(grep -E "^[[:space:]]*[-*][[:space:]]+\\[(x| )\\][[:space:]]+\\[${id}\\]" "$task_file" | head -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    echo ""
+    return 1
+  fi
+  line="$(printf "%s" "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[(x| )\][[:space:]]+//')"
+  trim_one_line "$line"
+}
+
+show_task_start() {
+  local workspace="$1"
+  local one
+  one="$(get_first_unchecked_task_one_liner "$workspace" || true)"
+  if [[ -z "$one" ]]; then
+    return 0
+  fi
+  show_info "Working on: $one"
+  log_out "$workspace" "Working on: $one"
+}
+
+show_task_completed() {
+  local workspace="$1"
+  local one="$2"
+  if [[ -z "$one" ]]; then
+    return 0
+  fi
+  if [[ "$HAS_GUM" == "true" ]]; then
+    gum style --foreground 10 --bold "✅ Completed: $one"
+  else
+    echo -e "\033[32m✅ Completed: $one\033[0m"
+  fi
+  log_out "$workspace" "✅ Completed: $one"
+}
+
 # Build a short, readable menu label for a TODO line.
 # Output format: "<first ~64 chars of description> [ABC123]"
 todo_menu_label_for_line() {
@@ -329,6 +410,12 @@ create_task_from_todo_selection() {
   } > "$task_file"
   
   reset_iteration_for_new_task_run "$workspace"
+  local first
+  first="$(get_first_unchecked_task_one_liner "$workspace" || true)"
+  if [[ -n "$first" ]]; then
+    show_info "Selected: $first"
+    log_out "$workspace" "Selected: $first"
+  fi
   show_success "Created MILHOUSE_TASK.md from TODO.md selection"
   return 0
 }
@@ -2218,6 +2305,11 @@ Fix:
   commits_start=$(track_commits_start "$workspace")
   local head_start=""
   head_start=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+
+  # Announce current task (one line) before the agent runs
+  show_task_start "$workspace"
+  local completed_before
+  completed_before="$(list_task_ids_by_state "$workspace" "x" || true)"
   
   echo "Follow along:"
   echo "  tail -f $output_file"
@@ -2230,6 +2322,29 @@ Fix:
   # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
   sync_task_progress_to_todo "$workspace"
   log_out "$workspace" "Synced MILHOUSE_TASK.md → TODO.md (best-effort)"
+
+  # Announce any newly completed checklist items
+  local completed_after
+  completed_after="$(list_task_ids_by_state "$workspace" "x" || true)"
+  if [[ -n "$completed_before" ]] || [[ -n "$completed_after" ]]; then
+    local before_f after_f
+    before_f="$(mktemp)"
+    after_f="$(mktemp)"
+    printf "%s\n" "$completed_before" | sort -u > "$before_f"
+    printf "%s\n" "$completed_after" | sort -u > "$after_f"
+    local new_ids
+    new_ids="$(comm -13 "$before_f" "$after_f" || true)"
+    rm -f "$before_f" "$after_f" >/dev/null 2>&1 || true
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      local one
+      one="$(get_task_one_liner_for_id "$workspace" "$id" || true)"
+      if [[ -z "$one" ]]; then
+        one="$id"
+      fi
+      show_task_completed "$workspace" "$one"
+    done <<< "$new_ids"
+  fi
   
   local duration_seconds
   duration_seconds=$(calculate_iteration_duration "$start_time")
@@ -2390,6 +2505,11 @@ Fix:
     log_out_section "$workspace" "Iteration $iteration"
     log_out "$workspace" "Progress: $done_count/$total ($remaining remaining)"
     
+    # Announce current task (one line) before the agent runs
+    show_task_start "$workspace"
+    local completed_before
+    completed_before="$(list_task_ids_by_state "$workspace" "x" || true)"
+
     local start_time
     start_time=$(track_iteration_start)
     local commits_start
@@ -2404,6 +2524,29 @@ Fix:
     # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
     sync_task_progress_to_todo "$workspace"
     log_out "$workspace" "Synced MILHOUSE_TASK.md → TODO.md (best-effort)"
+
+    # Announce any newly completed checklist items
+    local completed_after
+    completed_after="$(list_task_ids_by_state "$workspace" "x" || true)"
+    if [[ -n "$completed_before" ]] || [[ -n "$completed_after" ]]; then
+      local before_f after_f
+      before_f="$(mktemp)"
+      after_f="$(mktemp)"
+      printf "%s\n" "$completed_before" | sort -u > "$before_f"
+      printf "%s\n" "$completed_after" | sort -u > "$after_f"
+      local new_ids
+      new_ids="$(comm -13 "$before_f" "$after_f" || true)"
+      rm -f "$before_f" "$after_f" >/dev/null 2>&1 || true
+      while IFS= read -r id; do
+        [[ -z "$id" ]] && continue
+        local one
+        one="$(get_task_one_liner_for_id "$workspace" "$id" || true)"
+        if [[ -z "$one" ]]; then
+          one="$id"
+        fi
+        show_task_completed "$workspace" "$one"
+      done <<< "$new_ids"
+    fi
     
     local duration_seconds
     duration_seconds=$(calculate_iteration_duration "$start_time")
