@@ -262,9 +262,23 @@ Fix: Add tasks in TODO.md using this format:
       [[ -z "$line" ]] && continue
       todo_menu_label_for_line "$line"
     done <<< "$items")"
-    local picked
-    picked="$(printf "%s\n" "$menu" | gum choose --no-limit --header "Select TODO items for this run:")"
-    selected="$(todo_lines_from_selected_labels "$items" "$picked")"
+    local picked=""
+    local attempts=0
+    while true; do
+      attempts=$((attempts + 1))
+      picked="$(printf "%s\n" "$menu" | gum choose --no-limit --header "Select TODO items (space to select, enter to submit):")" || picked=""
+      selected="$(todo_lines_from_selected_labels "$items" "$picked")"
+
+      if [[ -n "$selected" ]]; then
+        break
+      fi
+
+      # If user pressed Enter without selecting (common), retry once with a clearer hint.
+      show_warning "No TODO items selected. Tip: press Space to select, then Enter to submit."
+      if [[ $attempts -ge 2 ]]; then
+        return 1
+      fi
+    done
   else
     show_info "Paste the TODO lines you want Milhouse to work on (end with an empty line):"
     local line
