@@ -353,6 +353,55 @@ Fix: Add tasks in TODO.md using this format:
 }
 
 # =============================================================================
+# OUT.TXT VERBOSE LOGGING (Milhouse journal + agent output)
+# =============================================================================
+
+# Ensure out.txt exists with a run header (once per run).
+# Args: workspace
+init_out_log() {
+  local workspace="$1"
+  local output_file="$workspace/.milhouse/out.txt"
+  mkdir -p "$workspace/.milhouse"
+  if [[ ! -f "$output_file" ]]; then
+    {
+      echo "═══════════════════════════════════════════════════════════════════"
+      echo "Milhouse run log (Milhouse + agent output)"
+      echo "Workspace: $workspace"
+      echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "═══════════════════════════════════════════════════════════════════"
+      echo ""
+    } > "$output_file"
+  fi
+}
+
+# Append a timestamped line to out.txt.
+# Args: workspace, message
+log_out() {
+  local workspace="$1"
+  local message="$2"
+  local output_file="$workspace/.milhouse/out.txt"
+  local ts
+  ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  mkdir -p "$workspace/.milhouse"
+  printf "[%s] %s\n" "$ts" "$message" >> "$output_file"
+}
+
+# Append a section header to out.txt.
+# Args: workspace, title
+log_out_section() {
+  local workspace="$1"
+  local title="$2"
+  local output_file="$workspace/.milhouse/out.txt"
+  mkdir -p "$workspace/.milhouse"
+  {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "$title"
+    echo "═══════════════════════════════════════════════════════════════════"
+  } >> "$output_file"
+}
+
+# =============================================================================
 # HELP TEXT
 # =============================================================================
 
@@ -1326,6 +1375,7 @@ run_agent_iteration() {
   # Change to workspace
   cd "$workspace" || return 1
   mkdir -p "$workspace/.milhouse"
+  init_out_log "$workspace"
   
   show_info "Running iteration $iteration..."
   show_info "Model: $model"
@@ -1333,15 +1383,11 @@ run_agent_iteration() {
   echo ""
   
   # Write a header immediately so “tail -f” shows something right away.
-  {
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo "Milhouse agent output"
-    echo "Iteration: $iteration"
-    echo "Model: $model"
-    echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
-  } > "$output_file"
+  log_out_section "$workspace" "Iteration $iteration — starting"
+  log_out "$workspace" "Mode: agent-run"
+  log_out "$workspace" "Model: $model"
+  log_out "$workspace" "Prompt length: ${#prompt} chars"
+  log_out "$workspace" "Milhouse will append agent output below."
   
   # Execute with spinner if gum available, plain message otherwise
   local exit_code
@@ -1359,9 +1405,11 @@ run_agent_iteration() {
   
   if [[ $exit_code -eq 0 ]]; then
     show_success "Iteration $iteration completed"
+    log_out "$workspace" "Agent exit: 0 (success)"
   else
     show_warning "Iteration $iteration exited with code $exit_code"
     show_info "Check $output_file for details. The loop will continue."
+    log_out "$workspace" "Agent exit: $exit_code (non-zero)"
   fi
   
   return $exit_code
@@ -1379,6 +1427,10 @@ run_single_iteration() {
   local model="${2:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
   
+  init_out_log "$workspace"
+  log_out_section "$workspace" "Single iteration (mode: --once)"
+  log_out "$workspace" "Model: $model"
+  
   show_header "📋 Single Iteration Mode" 12
   echo ""
   
@@ -1388,6 +1440,7 @@ run_single_iteration() {
   
   if [[ "$task_status" == "COMPLETE" ]]; then
     echo "🎉 Task already complete! All criteria are checked."
+    log_out "$workspace" "Status: COMPLETE (no work needed)"
     return 0
   fi
   
@@ -1400,11 +1453,13 @@ run_single_iteration() {
   
   show_progress "$((iteration + 1))" "$done_count" "$total" "$remaining"
   echo ""
+  log_out "$workspace" "Progress at start: $done_count/$total ($remaining remaining)"
   
   # Commit any uncommitted work first
   cd "$workspace" || return 1
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "📦 Committing uncommitted changes..."
+    log_out "$workspace" "Checkpoint: committing uncommitted changes before run"
     git add -A
     git commit -m "milhouse: checkpoint before single iteration" || true
     echo ""
@@ -1424,12 +1479,14 @@ run_single_iteration() {
   echo "Follow along:"
   echo "  tail -f $output_file"
   echo ""
+  log_out "$workspace" "Follow along: tail -f $output_file"
   
   run_agent_iteration "$workspace" "$iteration" "$model"
   local exit_code=$?
   
   # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
   sync_task_progress_to_todo "$workspace"
+  log_out "$workspace" "Synced MILHOUSE_TASK.md → TODO.md (best-effort)"
   
   local duration_seconds
   duration_seconds=$(calculate_iteration_duration "$start_time")
@@ -1437,21 +1494,25 @@ run_single_iteration() {
   commits_in_iteration=$(count_commits_in_iteration "$commits_start" "$workspace")
   local files_changed
   files_changed=$(count_files_changed_since_commit "$workspace" "$head_start")
+  log_out "$workspace" "Iteration stats: duration=${duration_seconds}s commits=${commits_in_iteration} files=${files_changed}"
   
   local health
   health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
   show_info "Context health: $health"
+  log_out "$workspace" "Context health: $health"
   
   # Rotation reporting (Phase 2): tell the operator why we'd rotate.
   local rotation_reason=""
   if rotation_reason=$(should_rotate "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL"); then
     log_rotation_reason "$rotation_reason"
+    log_out "$workspace" "Rotation heuristic triggered: $rotation_reason"
   fi
   
   # Gutter detection (Phase 3): stop and report why.
   local gutter_reason=""
   if gutter_reason=$(check_gutter "$workspace" "$iteration" "$duration_seconds" "$output_file" "MILHOUSE_TASK.md"); then
     log_gutter_reason "$gutter_reason"
+    log_out "$workspace" "Gutter detected: $gutter_reason"
     echo ""
     echo "Stopped: $gutter_reason"
     return 1
@@ -1470,11 +1531,13 @@ run_single_iteration() {
     show_success "Task completed in single iteration!"
     echo ""
     show_progress "$iteration" "$done_count" "$total" "$remaining"
+    log_out "$workspace" "Status: COMPLETE"
     return 0
   else
     show_progress "$iteration" "$done_count" "$total" "$remaining"
     echo ""
     show_info "Review the changes and run again or proceed to full loop."
+    log_out "$workspace" "Status: INCOMPLETE ($remaining remaining)"
     return 1
   fi
 }
@@ -1492,6 +1555,11 @@ run_milhouse_loop() {
   local model="${3:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
   
+  init_out_log "$workspace"
+  log_out_section "$workspace" "Loop run (mode: --loop)"
+  log_out "$workspace" "Model: $model"
+  log_out "$workspace" "Max iterations: $max_iterations"
+  
   show_header "🔄 Loop Mode (max: $max_iterations iterations)" 12
   echo ""
   
@@ -1499,6 +1567,7 @@ run_milhouse_loop() {
   cd "$workspace" || return 1
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "📦 Committing uncommitted changes..."
+    log_out "$workspace" "Checkpoint: committing uncommitted changes before loop"
     git add -A
     git commit -m "milhouse: initial commit before loop" || true
     echo ""
@@ -1521,6 +1590,7 @@ run_milhouse_loop() {
   echo "Follow along:"
   echo "  tail -f $output_file"
   echo ""
+  log_out "$workspace" "Follow along: tail -f $output_file"
   
   # Main loop
   while [[ $iteration -lt $max_iterations ]]; do
@@ -1536,6 +1606,8 @@ run_milhouse_loop() {
     echo ""
     show_progress "$iteration" "$done_count" "$total" "$remaining"
     echo ""
+    log_out_section "$workspace" "Iteration $iteration"
+    log_out "$workspace" "Progress: $done_count/$total ($remaining remaining)"
     
     local start_time
     start_time=$(track_iteration_start)
@@ -1550,6 +1622,7 @@ run_milhouse_loop() {
     
     # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
     sync_task_progress_to_todo "$workspace"
+    log_out "$workspace" "Synced MILHOUSE_TASK.md → TODO.md (best-effort)"
     
     local duration_seconds
     duration_seconds=$(calculate_iteration_duration "$start_time")
@@ -1557,10 +1630,12 @@ run_milhouse_loop() {
     commits_in_iteration=$(count_commits_in_iteration "$commits_start" "$workspace")
     local files_changed
     files_changed=$(count_files_changed_since_commit "$workspace" "$head_start")
+    log_out "$workspace" "Iteration stats: duration=${duration_seconds}s commits=${commits_in_iteration} files=${files_changed}"
     
     local health
     health=$(get_context_health_emoji "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL")
     show_info "Context health: $health"
+    log_out "$workspace" "Context health: $health"
     
     # Check completion
     task_status=$(check_task_complete "$workspace")
@@ -1571,6 +1646,7 @@ run_milhouse_loop() {
       echo ""
       show_success "Completed in $iteration iteration(s)."
       show_info "Check git log for detailed history."
+      log_out "$workspace" "Status: COMPLETE"
       return 0
     fi
     
@@ -1579,6 +1655,7 @@ run_milhouse_loop() {
     if rotation_reason=$(should_rotate "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL"); then
       log_rotation_reason "$rotation_reason"
       echo ""
+      log_out "$workspace" "Rotation heuristic triggered: $rotation_reason"
     fi
     
     # Gutter detection (Phase 3): stop and report why.
@@ -1594,6 +1671,7 @@ run_milhouse_loop() {
       echo "  2. Simplify MILHOUSE_TASK.md"
       echo "  3. Fix the blocking issue manually"
       echo ""
+      log_out "$workspace" "Gutter detected: $gutter_reason"
       return 1
     fi
     
@@ -1607,9 +1685,11 @@ run_milhouse_loop() {
   echo ""
   show_header "⚠️  Maximum iterations reached ($max_iterations)" 3
   echo ""
+  log_out "$workspace" "Status: STOPPED (max iterations reached: $max_iterations)"
   task_status=$(check_task_complete "$workspace")
   if [[ "$task_status" == "COMPLETE" ]]; then
     show_success "Task is complete!"
+    log_out "$workspace" "Final status: COMPLETE"
     return 0
   else
     local counts
@@ -1618,6 +1698,7 @@ run_milhouse_loop() {
     show_progress "$max_iterations" "$done_count" "$total" "$remaining"
     echo ""
     show_info "Review progress and continue or adjust task."
+    log_out "$workspace" "Final status: INCOMPLETE ($remaining remaining)"
     return 1
   fi
 }
