@@ -2,47 +2,36 @@
 
 ## Current Phase
 
-🚧 **Phase 0: Planning & Design**
+✅ **Runnable**
 
-Project structure and design principles established. Ready to begin Phase 1 implementation.
+Milhouse is runnable end-to-end via `scripts/milhouse.sh`, with `install.sh` available to install it into another repo.
 
 ## Progress Overview
 
 ### ✅ Completed
+
 - Project structure created
 - Implementation plan documented (MILHOUSE_PLAN.md)
 - UI design rules established (UI_RULES.md, GUM_TUI_RULES.md)
 - Architecture decisions made (heuristic-based, single script, git as audit trail)
+- Core loop implemented (`scripts/milhouse.sh`)
+- Rotation heuristics implemented (fixed + time/files/commits)
+- Gutter detection implemented
+- UX polish implemented (gum UI + fallback, clearer errors, progress/status)
+- Installer added (`install.sh`)
+- Human-readable run log (`.milhouse/out.txt`) with optional raw stream (`.milhouse/out.stream.jsonl`)
 
 ### 🚧 In Progress
+
 - None currently
 
 ### 📋 Planned
 
-#### Phase 1: Core Loop
-- [ ] Create `milhouse.sh` script
-- [ ] Implement basic task reading (MILHOUSE_TASK.md)
-- [ ] Implement checkbox completion checking
-- [ ] Implement basic iteration loop
-- [ ] Fixed rotation (every N iterations)
+#### Testing & Documentation
 
-#### Phase 2: Smart Rotation
-- [ ] Add time-based rotation heuristic
-- [ ] Add file count-based rotation heuristic
-- [ ] Add commit count-based rotation heuristic
-- [ ] Test rotation triggers
-
-#### Phase 3: Gutter Detection
-- [ ] Implement git log analysis for repeated errors
-- [ ] Detect no-progress scenarios
-- [ ] Agent gutter signal handling
-- [ ] Test gutter detection
-
-#### Phase 4: Polish
-- [ ] Interactive setup with gum UI
-- [ ] Better error messages
-- [ ] Progress reporting
-- [ ] Help text and documentation
+- [ ] Create test task file example
+- [ ] Expand usage documentation in README
+- [ ] Document rotation/gutter heuristics and tuning
 
 ## Key Decisions
 
@@ -60,9 +49,9 @@ Project structure and design principles established. Ready to begin Phase 1 impl
 
 ## Next Steps
 
-1. Begin Phase 1: Create basic `milhouse.sh` script
-2. Test with simple task definition
-3. Iterate based on testing
+1. Finish the remaining documentation tasks (README usage + heuristics)
+2. Add a sample task file for testing/demo
+3. Keep the changelog updated as behavior changes
 
 ## Notes
 

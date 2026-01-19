@@ -369,7 +369,7 @@ init_out_log() {
       echo "Workspace: $workspace"
       echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
       echo "═══════════════════════════════════════════════════════════════════"
-      echo "Note: raw agent stream is also saved to: .milhouse/out.stream.jsonl"
+      echo "Tip: set MILHOUSE_AGENT_OUTPUT_MODE=stream-json to also save raw stream to: .milhouse/out.stream.jsonl"
       echo ""
     } > "$output_file"
   fi
@@ -418,6 +418,20 @@ def emit(s: str):
     sys.stdout.write("\n")
   sys.stdout.flush()
 
+def looks_like_json(s: str) -> bool:
+  s = (s or "").lstrip()
+  return s.startswith("{") or s.startswith("[")
+
+def summarize_tool_use(item: dict) -> str:
+  name = item.get("name") or item.get("tool_name") or item.get("tool") or "tool"
+  inp = item.get("input") or item.get("arguments") or {}
+  if not isinstance(inp, dict):
+    return f"🛠️ {name}"
+  path = inp.get("path") or inp.get("file_path") or inp.get("target") or inp.get("downloadPath")
+  if isinstance(path, str) and path.strip():
+    return f"🛠️ {name} → {path}"
+  return f"🛠️ {name}"
+
 for line in sys.stdin:
   raw = line.rstrip("\n")
   if not raw.strip():
@@ -425,21 +439,33 @@ for line in sys.stdin:
   try:
     obj = json.loads(raw)
   except Exception:
-    # Keep non-JSON lines (often useful errors), but avoid spammy whitespace.
-    emit(raw)
+    # Keep only genuinely useful non-JSON lines.
+    # Drop giant JSON-ish blobs that failed to parse (they are unreadable in tail -f).
+    if looks_like_json(raw):
+      continue
+    # Prefer to keep obvious error lines.
+    low = raw.lower()
+    if ("error" in low) or ("traceback" in low) or ("exception" in low):
+      emit(raw)
     continue
 
   t = obj.get("type")
   if t != "assistant":
     continue
 
+  msg = obj.get("message") or {}
+  content = msg.get("content") or []
+
+  # Summarize tool calls in one clean line (instead of dumping JSON).
+  for c in content:
+    if isinstance(c, dict) and c.get("type") in ("tool_use", "tool_call"):
+      emit(summarize_tool_use(c))
+
   # Heuristic: only print the "final" assistant message, not partial fragments.
   # The partial fragments tend to be tiny; the final tends to include model_call_id.
   if not obj.get("model_call_id"):
     continue
 
-  msg = obj.get("message") or {}
-  content = msg.get("content") or []
   parts = []
   for c in content:
     if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str):
@@ -478,6 +504,108 @@ log_out_section() {
 }
 
 # =============================================================================
+# OUT.TXT HEARTBEAT (periodic, readable progress)
+# =============================================================================
+
+estimate_tokens_from_chars() {
+  local chars="${1:-0}"
+  if [[ -z "$chars" ]]; then
+    echo "0"
+    return 0
+  fi
+  # Rough heuristic: ~4 chars/token in English-ish text.
+  echo $(((chars + 3) / 4))
+}
+
+token_level_emoji() {
+  local tokens="${1:-0}"
+  local yellow="${MILHOUSE_TOKEN_YELLOW:-20000}"
+  local orange="${MILHOUSE_TOKEN_ORANGE:-40000}"
+  local red="${MILHOUSE_TOKEN_RED:-60000}"
+  if (( tokens < yellow )); then
+    echo "🟢"
+  elif (( tokens < orange )); then
+    echo "🟡"
+  elif (( tokens < red )); then
+    echo "🟠"
+  else
+    echo "🔴"
+  fi
+}
+
+format_duration_compact() {
+  local seconds="${1:-0}"
+  local m=$((seconds / 60))
+  local s=$((seconds % 60))
+  if (( m <= 0 )); then
+    printf "%ss" "$s"
+  else
+    printf "%sm%02ss" "$m" "$s"
+  fi
+}
+
+start_out_log_heartbeat() {
+  # Args: workspace, iteration, model, prompt_chars
+  local workspace="$1"
+  local iteration="$2"
+  local model="$3"
+  local prompt_chars="${4:-0}"
+
+  local interval="${MILHOUSE_LOG_HEARTBEAT_SECONDS:-120}" # 2 minutes default
+  if [[ -z "$interval" ]] || (( interval <= 0 )); then
+    interval="120"
+  fi
+
+  local prompt_tokens
+  prompt_tokens="$(estimate_tokens_from_chars "$prompt_chars")"
+  local tok_emoji
+  tok_emoji="$(token_level_emoji "$prompt_tokens")"
+
+  log_out "$workspace" "Heartbeat: every ${interval}s (elapsed + token level). Prompt: ${tok_emoji} ~${prompt_tokens} tokens"
+
+  (
+    local start_epoch
+    start_epoch="$(date +%s)"
+    while true; do
+      sleep "$interval" || exit 0
+      local now elapsed
+      now="$(date +%s)"
+      elapsed=$((now - start_epoch))
+      local elapsed_s
+      elapsed_s="$(format_duration_compact "$elapsed")"
+
+      # Prompt token level is a proxy for context size; it won't reflect hidden system tokens,
+      # but it's good enough for a “green/yellow/orange/red” signal.
+      local emoji
+      emoji="$(token_level_emoji "$prompt_tokens")"
+
+      local nudge=""
+      if [[ "$emoji" == "🟠" ]]; then
+        nudge=" — getting heavy; consider resetting soon"
+      elif [[ "$emoji" == "🔴" ]]; then
+        nudge=" — very heavy; reset strongly recommended"
+      fi
+
+      log_out "$workspace" "⏱️ ${elapsed_s} | tokens ${emoji} ~${prompt_tokens} (prompt)${nudge}"
+    done
+  ) &
+
+  echo $!
+}
+
+stop_out_log_heartbeat() {
+  # Args: pid
+  local pid="${1:-}"
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+# =============================================================================
 # HELP TEXT
 # =============================================================================
 
@@ -495,6 +623,9 @@ MODES
   --once        Run a single iteration then stop
   --loop        Run continuous loop until completion (default)
   --setup       Interactive setup for model and options
+  --stop-after  Ask a running Milhouse to stop after current iteration
+  --stop-now    Stop a running Milhouse immediately (kills agent), then sync TODO
+  --status      Show whether Milhouse is running in this workspace
   --help        Show this help message
 
 ARGUMENTS
@@ -504,12 +635,21 @@ ENVIRONMENT VARIABLES
   MILHOUSE_MODEL              AI model to use (default: opus-4.5-thinking)
   MILHOUSE_MAX_ITERATIONS     Maximum iterations before stopping (default: 20)
   MILHOUSE_ROTATION_INTERVAL  Fixed rotation every N iterations (default: 5)
+  MILHOUSE_AGENT_OUTPUT_MODE  plain (default) or stream-json (also writes .milhouse/out.stream.jsonl)
+  MILHOUSE_LOG_HEARTBEAT_SECONDS
+                             How often to write a simple progress line to .milhouse/out.txt (default: 120)
+  MILHOUSE_TOKEN_YELLOW       Prompt token estimate threshold for 🟡 (default: 20000)
+  MILHOUSE_TOKEN_ORANGE       Prompt token estimate threshold for 🟠 (default: 40000)
+  MILHOUSE_TOKEN_RED          Prompt token estimate threshold for 🔴 (default: 60000)
 
 EXAMPLES
   ./milhouse.sh                              # Loop mode, current directory
   ./milhouse.sh --once                       # Single iteration, then stop
   ./milhouse.sh --loop /path/to/project      # Loop mode, specific project
   ./milhouse.sh --setup                      # Interactive configuration
+  ./milhouse.sh --stop-after                 # Stop after current iteration
+  ./milhouse.sh --stop-now /path/to/project  # Stop immediately (kill agent)
+  ./milhouse.sh --status                     # Show running status
   MILHOUSE_MODEL=sonnet-4 ./milhouse.sh      # Use specific model
   MILHOUSE_MAX_ITERATIONS=50 ./milhouse.sh   # Run up to 50 iterations
 
@@ -554,6 +694,18 @@ while [[ $# -gt 0 ]]; do
       MODE="setup"
       shift
       ;;
+    --stop-after)
+      MODE="stop-after"
+      shift
+      ;;
+    --stop-now)
+      MODE="stop-now"
+      shift
+      ;;
+    --status)
+      MODE="status"
+      shift
+      ;;
     --help|-h)
       show_help
       exit 0
@@ -566,6 +718,9 @@ Valid options:
   --once   Run a single iteration then stop
   --loop   Run continuous loop until completion
   --setup  Interactive setup
+  --stop-after  Stop after current iteration
+  --stop-now    Stop immediately (kill agent)
+  --status      Show running status
   --help   Show usage information
 
 Fix: Check your command and try again, or run:
@@ -611,6 +766,223 @@ fi
 # =============================================================================
 # PHASE 1: STATE FILE MANAGEMENT
 # =============================================================================
+
+# =============================================================================
+# STOP MECHANISM (Operator control)
+# =============================================================================
+
+# Per-workspace control files (all live under .milhouse/)
+milhouse_pid_file() { echo "$1/.milhouse/milhouse.pid"; }
+milhouse_stop_after_file() { echo "$1/.milhouse/stop.after"; }
+milhouse_stop_now_file() { echo "$1/.milhouse/stop.now"; }
+milhouse_stop_reason_file() { echo "$1/.milhouse/stop.reason"; }
+
+# Runtime state used by signal handlers (best-effort; kept simple)
+CURRENT_WORKSPACE=""
+CURRENT_AGENT_PID=""
+CURRENT_AGENT_PIPE_PID=""
+CURRENT_AGENT_PIPE_FIFO=""
+CURRENT_HEARTBEAT_PID=""
+
+is_pid_running() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_running_pid() {
+  local workspace="$1"
+  local pid_file
+  pid_file="$(milhouse_pid_file "$workspace")"
+  [[ -f "$pid_file" ]] || { echo ""; return 1; }
+  local pid
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
+    echo "$pid"
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+write_running_pid() {
+  local workspace="$1"
+  local pid_file
+  pid_file="$(milhouse_pid_file "$workspace")"
+  mkdir -p "$workspace/.milhouse"
+  echo "$$" > "$pid_file"
+}
+
+clear_running_pid() {
+  local workspace="$1"
+  local pid_file
+  pid_file="$(milhouse_pid_file "$workspace")"
+  rm -f "$pid_file" >/dev/null 2>&1 || true
+}
+
+clear_stop_requests() {
+  local workspace="$1"
+  rm -f "$(milhouse_stop_after_file "$workspace")" >/dev/null 2>&1 || true
+  rm -f "$(milhouse_stop_now_file "$workspace")" >/dev/null 2>&1 || true
+  rm -f "$(milhouse_stop_reason_file "$workspace")" >/dev/null 2>&1 || true
+}
+
+request_stop_after() {
+  local workspace="$1"
+  local reason="${2:-requested}"
+  mkdir -p "$workspace/.milhouse"
+  echo "$reason" > "$(milhouse_stop_reason_file "$workspace")"
+  : > "$(milhouse_stop_after_file "$workspace")"
+}
+
+request_stop_now() {
+  local workspace="$1"
+  local reason="${2:-requested}"
+  mkdir -p "$workspace/.milhouse"
+  echo "$reason" > "$(milhouse_stop_reason_file "$workspace")"
+  : > "$(milhouse_stop_now_file "$workspace")"
+}
+
+get_stop_request() {
+  local workspace="$1"
+  if [[ -f "$(milhouse_stop_now_file "$workspace")" ]]; then
+    echo "now"
+    return 0
+  fi
+  if [[ -f "$(milhouse_stop_after_file "$workspace")" ]]; then
+    echo "after"
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+ensure_single_instance() {
+  local workspace="$1"
+  local pid
+  pid="$(read_running_pid "$workspace" || true)"
+  if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+    show_error "Milhouse is already running in this workspace" \
+      "Workspace: $workspace
+PID: $pid
+
+Fix:
+  - Check status: $0 --status \"$workspace\"
+  - Stop after current iteration: $0 --stop-after \"$workspace\"
+  - Stop immediately: $0 --stop-now \"$workspace\""
+    return 1
+  fi
+  return 0
+}
+
+kill_pid_with_timeout() {
+  # Args: pid, label, timeout_seconds
+  local pid="${1:-}"
+  local label="${2:-process}"
+  local timeout="${3:-2}"
+  [[ -n "$pid" ]] || return 0
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+
+  if ! is_pid_running "$pid"; then
+    return 0
+  fi
+
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  local waited=0
+  while is_pid_running "$pid" && [[ $waited -lt $timeout ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if is_pid_running "$pid"; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+kill_current_agent_processes() {
+  # Best-effort: stop the in-flight cursor-agent and its companion pipeline.
+  if [[ -n "$CURRENT_AGENT_PID" ]]; then
+    kill_pid_with_timeout "$CURRENT_AGENT_PID" "cursor-agent" 2
+  fi
+  if [[ -n "$CURRENT_AGENT_PIPE_PID" ]]; then
+    kill_pid_with_timeout "$CURRENT_AGENT_PIPE_PID" "stream pipeline" 2
+  fi
+  if [[ -n "$CURRENT_AGENT_PIPE_FIFO" ]] && [[ -p "$CURRENT_AGENT_PIPE_FIFO" ]]; then
+    rm -f "$CURRENT_AGENT_PIPE_FIFO" >/dev/null 2>&1 || true
+  fi
+  CURRENT_AGENT_PID=""
+  CURRENT_AGENT_PIPE_PID=""
+  CURRENT_AGENT_PIPE_FIFO=""
+}
+
+cleanup_on_exit() {
+  local code=$?
+  if [[ -n "$CURRENT_WORKSPACE" ]]; then
+    # Stop any active heartbeat and agent subprocesses
+    stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID"
+    CURRENT_HEARTBEAT_PID=""
+    kill_current_agent_processes
+
+    # Best-effort: sync progress back to TODO.md before exiting
+    sync_task_progress_to_todo "$CURRENT_WORKSPACE" || true
+
+    clear_running_pid "$CURRENT_WORKSPACE"
+    clear_stop_requests "$CURRENT_WORKSPACE"
+  fi
+  return "$code"
+}
+
+handle_interrupt() {
+  # Ctrl+C handler: offer a choice when possible; default to "stop now" if not.
+  local workspace="$CURRENT_WORKSPACE"
+  [[ -n "$workspace" ]] || exit 130
+
+  # If a stop is already requested, escalate to immediate stop.
+  if [[ -n "$(get_stop_request "$workspace" || true)" ]]; then
+    request_stop_now "$workspace" "forced (second interrupt)"
+    show_warning "Stopping immediately (forced)..."
+    log_out "$workspace" "Stop: immediate (forced)"
+    kill_current_agent_processes
+    exit 130
+  fi
+
+  local choice="stop-now"
+  if [[ "$HAS_GUM" == "true" ]] && [[ -t 0 ]] && [[ -t 1 ]]; then
+    choice="$(gum choose --header "Stop Milhouse?" \
+      "Stop after current iteration (safe)" \
+      "Stop immediately (kill agent)" \
+      "Continue running")" || choice="Stop immediately (kill agent)"
+    if [[ "$choice" == "Continue running" ]]; then
+      show_info "Continuing..."
+      log_out "$workspace" "Stop: cancelled (continue running)"
+      return 0
+    fi
+    if [[ "$choice" == "Stop after current iteration (safe)" ]]; then
+      request_stop_after "$workspace" "requested via Ctrl+C (after iteration)"
+      show_warning "Will stop after the current iteration finishes."
+      log_out "$workspace" "Stop: after current iteration (requested via Ctrl+C)"
+      return 0
+    fi
+    # Fallthrough: immediate
+  fi
+
+  request_stop_now "$workspace" "requested via Ctrl+C (immediate)"
+  show_warning "Stopping immediately..."
+  log_out "$workspace" "Stop: immediate (requested via Ctrl+C)"
+  kill_current_agent_processes
+  exit 130
+}
+
+handle_terminate() {
+  # SIGTERM handler: always stop immediately (no prompts).
+  local workspace="$CURRENT_WORKSPACE"
+  [[ -n "$workspace" ]] || exit 143
+  request_stop_now "$workspace" "terminated (SIGTERM)"
+  show_warning "Stopping immediately (SIGTERM)..."
+  log_out "$workspace" "Stop: immediate (SIGTERM)"
+  kill_current_agent_processes
+  exit 143
+}
 
 # Initialize .milhouse/ directory structure and state files
 # Args: workspace
@@ -1048,8 +1420,10 @@ get_context_health_emoji() {
   
   if [[ $max_pct -lt 60 ]]; then
     echo "🟢"
-  elif [[ $max_pct -lt 85 ]]; then
+  elif [[ $max_pct -lt 80 ]]; then
     echo "🟡"
+  elif [[ $max_pct -lt 95 ]]; then
+    echo "🟠"
   else
     echo "🔴"
   fi
@@ -1096,15 +1470,19 @@ get_token_budget_status_line() {
   if [[ $remaining -lt 0 ]]; then remaining=0; fi
   
   local note=""
-  if [[ $max_pct -ge 85 ]]; then
-    note="token reset will occur soon (refresh threshold approaching)"
+  if [[ $max_pct -ge 95 ]]; then
+    note="reset strongly recommended"
+  elif [[ $max_pct -ge 80 ]]; then
+    note="reset soon"
   elif [[ $max_pct -ge 60 ]]; then
-    note="token budget mid-way (keep changes focused)"
+    note="getting busy"
   else
-    note="token budget healthy"
+    note="healthy"
   fi
-  
-  echo "$emoji Tokens (est): used ~$used/$token_capacity (~${max_pct}%), remaining ~$remaining — $note"
+
+  local dur
+  dur="$(format_duration_compact "$duration_seconds")"
+  echo "$emoji Context: ~${max_pct}% | ${dur} | ${file_count} files | ${commit_count} commits | est used ~$used/$token_capacity — $note"
 }
 
 # =============================================================================
@@ -1496,10 +1874,12 @@ run_agent_iteration() {
   local model="${3:-$MODEL}"
   local output_file="$workspace/.milhouse/out.txt"
   local raw_stream_file="$workspace/.milhouse/out.stream.jsonl"
+  local agent_output_mode="${MILHOUSE_AGENT_OUTPUT_MODE:-plain}" # plain|stream-json
   
   # Build prompt
   local prompt
   prompt=$(build_prompt "$workspace" "$iteration")
+  local prompt_chars="${#prompt}"
   
   # Change to workspace
   cd "$workspace" || return 1
@@ -1515,9 +1895,14 @@ run_agent_iteration() {
   log_out_section "$workspace" "Iteration $iteration — starting"
   log_out "$workspace" "Mode: agent-run"
   log_out "$workspace" "Model: $model"
-  log_out "$workspace" "Prompt length: ${#prompt} chars"
-  log_out "$workspace" "Milhouse will append cleaned agent output below."
-  log_out "$workspace" "Raw agent stream: $raw_stream_file"
+  log_out "$workspace" "Prompt length: ${prompt_chars} chars"
+  if [[ "$agent_output_mode" == "stream-json" ]]; then
+    log_out "$workspace" "Log mode: stream-json (cleaned text + raw stream saved)"
+    log_out "$workspace" "Raw agent stream: $raw_stream_file"
+  else
+    log_out "$workspace" "Log mode: plain (clean, readable log)"
+    log_out "$workspace" "Tip: set MILHOUSE_AGENT_OUTPUT_MODE=stream-json for extra debug data"
+  fi
   
   # Execute the agent.
   #
@@ -1525,17 +1910,57 @@ run_agent_iteration() {
   # In practice, spinner wrappers can cause “Aborting operation...” or apparent hangs.
   # The “Follow along” tail command is the preferred live view.
   echo "Agent working on iteration $iteration..."
-  {
+  CURRENT_HEARTBEAT_PID="$(start_out_log_heartbeat "$workspace" "$iteration" "$model" "$prompt_chars")"
+  local exit_code=0
+
+  # Reset stop/runtime tracking for this iteration
+  CURRENT_AGENT_PID=""
+  CURRENT_AGENT_PIPE_PID=""
+  CURRENT_AGENT_PIPE_FIFO=""
+
+  if [[ "$agent_output_mode" == "stream-json" ]]; then
+    # Stream-json mode:
+    # - cursor-agent writes to a FIFO (so we can track its PID and kill it reliably)
+    # - a background pipeline tees to raw stream + cleaned out.txt
+    local fifo="$workspace/.milhouse/.agent.stream.fifo"
+    rm -f "$fifo" >/dev/null 2>&1 || true
+    mkfifo "$fifo"
+    CURRENT_AGENT_PIPE_FIFO="$fifo"
+
+    # Tee raw stream + write cleaned text in background.
+    ( tee -a "$raw_stream_file" < "$fifo" | clean_cursor_agent_stream >> "$output_file" ) &
+    CURRENT_AGENT_PIPE_PID="$!"
+
+    # Run cursor-agent in background so stop handlers can kill it.
     cursor-agent -p --force \
       --output-format stream-json \
       --stream-partial-output \
       --workspace "$workspace" \
       --model "$model" \
-      "$prompt" 2>&1 \
-      | tee -a "$raw_stream_file" \
-      | clean_cursor_agent_stream >> "$output_file"
-  }
-  local exit_code=$?
+      "$prompt" > "$fifo" 2>&1 &
+    CURRENT_AGENT_PID="$!"
+
+    exit_code=0
+    wait "$CURRENT_AGENT_PID" || exit_code=$?
+
+    # Let the tee/clean pipeline flush and exit.
+    wait "$CURRENT_AGENT_PIPE_PID" >/dev/null 2>&1 || true
+    rm -f "$fifo" >/dev/null 2>&1 || true
+    CURRENT_AGENT_PIPE_FIFO=""
+  else
+    # Default: plain output. This avoids noisy JSON logs and is the most stable.
+    cursor-agent -p --force \
+      --workspace "$workspace" \
+      --model "$model" \
+      "$prompt" >> "$output_file" 2>&1 &
+    CURRENT_AGENT_PID="$!"
+    exit_code=0
+    wait "$CURRENT_AGENT_PID" || exit_code=$?
+  fi
+  stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID"
+  CURRENT_HEARTBEAT_PID=""
+  CURRENT_AGENT_PID=""
+  CURRENT_AGENT_PIPE_PID=""
   
   if [[ $exit_code -eq 0 ]]; then
     show_success "Iteration $iteration completed"
@@ -1726,10 +2151,29 @@ run_milhouse_loop() {
   echo "Follow along:"
   echo "  tail -f $output_file"
   echo ""
+  echo "Stop controls:"
+  echo "  Stop after current iteration: $0 --stop-after \"$workspace\""
+  echo "  Stop immediately (kill agent): $0 --stop-now \"$workspace\""
+  echo "  Or press Ctrl+C for a stop menu"
+  echo ""
   log_out "$workspace" "Follow along: tail -f $output_file"
+  log_out "$workspace" "Stop: $0 --stop-after \"$workspace\"  |  $0 --stop-now \"$workspace\""
   
   # Main loop
   while [[ $iteration -lt $max_iterations ]]; do
+    # Stop-now request: exit immediately (best-effort sync happens in EXIT trap).
+    if [[ "$(get_stop_request "$workspace" || true)" == "now" ]]; then
+      show_warning "Stop requested: stopping immediately."
+      log_out "$workspace" "Stop requested: immediate (loop will exit)"
+      return 0
+    fi
+    # Stop-after request before an iteration starts: stop cleanly without starting another run.
+    if [[ "$(get_stop_request "$workspace" || true)" == "after" ]]; then
+      show_warning "Stop requested: stopping before starting the next iteration."
+      log_out "$workspace" "Stop requested: after (before next iteration)"
+      return 0
+    fi
+
     # Increment iteration
     iteration=$(increment_iteration "$workspace")
     
@@ -1785,6 +2229,13 @@ run_milhouse_loop() {
       show_success "Completed in $iteration iteration(s)."
       show_info "Check git log for detailed history."
       log_out "$workspace" "Status: COMPLETE"
+      return 0
+    fi
+
+    # Stop-after request: finish the iteration, sync TODO, then exit.
+    if [[ "$(get_stop_request "$workspace" || true)" == "after" ]]; then
+      show_warning "Stop requested: stopping after current iteration."
+      log_out "$workspace" "Stop requested: after current iteration (loop will exit)"
       return 0
     fi
     
@@ -1984,6 +2435,51 @@ main() {
   show_info "Mode:      $MODE"
   show_info "Workspace: $WORKSPACE"
   echo ""
+
+  # Control-only modes (no agent run)
+  case "$MODE" in
+    status)
+      mkdir -p "$WORKSPACE/.milhouse"
+      local pid
+      pid="$(read_running_pid "$WORKSPACE" || true)"
+      if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+        show_success "Milhouse is running (PID: $pid)"
+        local stop
+        stop="$(get_stop_request "$WORKSPACE" || true)"
+        if [[ -n "$stop" ]]; then
+          show_warning "Stop requested: $stop"
+        else
+          show_info "Stop requested: none"
+        fi
+      else
+        show_info "Milhouse is not running in this workspace."
+      fi
+      exit 0
+      ;;
+    stop-after)
+      mkdir -p "$WORKSPACE/.milhouse"
+      request_stop_after "$WORKSPACE" "requested via CLI (--stop-after)"
+      show_success "Requested stop after current iteration."
+      show_info "If Milhouse is running, it will stop after it finishes the current iteration and sync TODO."
+      exit 0
+      ;;
+    stop-now)
+      mkdir -p "$WORKSPACE/.milhouse"
+      request_stop_now "$WORKSPACE" "requested via CLI (--stop-now)"
+      local pid
+      pid="$(read_running_pid "$WORKSPACE" || true)"
+      if [[ -n "$pid" ]] && is_pid_running "$pid"; then
+        show_warning "Stopping Milhouse now (PID: $pid)..."
+        kill_pid_with_timeout "$pid" "milhouse" 2
+      else
+        show_warning "No running Milhouse PID found; syncing TODO anyway."
+      fi
+      # Even if the running process couldn't do its own cleanup, sync TODO now (best-effort).
+      sync_task_progress_to_todo "$WORKSPACE" || true
+      show_success "Stop-now complete (best-effort)."
+      exit 0
+      ;;
+  esac
   
   # Check prerequisites first
   # Allow missing MILHOUSE_TASK.md: we can create it interactively.
@@ -1995,6 +2491,17 @@ main() {
   
   # Initialize state directory
   init_state "$WORKSPACE"
+
+  # Register this run for stop control + cleanup
+  if ! ensure_single_instance "$WORKSPACE"; then
+    exit 1
+  fi
+  CURRENT_WORKSPACE="$WORKSPACE"
+  write_running_pid "$WORKSPACE"
+  clear_stop_requests "$WORKSPACE"
+  trap cleanup_on_exit EXIT
+  trap handle_interrupt INT
+  trap handle_terminate TERM
   
   # If task file is missing, ask what to work on (TODO.md picker or custom goal).
   if ! ensure_task_file "$WORKSPACE"; then
@@ -2029,11 +2536,17 @@ Valid modes:
   --once   Run a single iteration then stop
   --loop   Run continuous loop until completion
   --setup  Interactive setup
+  --stop-after  Stop after current iteration
+  --stop-now    Stop immediately (kill agent)
+  --status      Show running status
 
 Fix: Use a valid mode flag:
   $0 --loop
   $0 --once
-  $0 --setup"
+  $0 --setup
+  $0 --status
+  $0 --stop-after
+  $0 --stop-now"
       exit 1
       ;;
   esac

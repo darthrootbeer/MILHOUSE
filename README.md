@@ -8,7 +8,7 @@ Milhouse is a streamlined version of the Ralph autonomous iteration technique fo
 
 ## Project Structure
 
-```
+```text
 milhouse/
 ├── .cursor/
 │   ├── commands → TOOLBOX/.cursor/commands
@@ -32,9 +32,30 @@ milhouse/
 
 ## Getting Started
 
-1. Review `MILHOUSE_PLAN.md` for the full implementation plan
-2. Check `UI_RULES.md` for Milhouse-specific UI guidelines
-3. Reference `GUM_TUI_RULES.md` for general TUI best practices
+### Install into another project
+
+From the project you want to use Milhouse in:
+
+```bash
+bash "/path/to/milhouse/install.sh" --yes --force --target "$(pwd)"
+```
+
+Then run:
+
+```bash
+./scripts/milhouse.sh
+```
+
+### Follow along (logs)
+
+- `tail -f .milhouse/out.txt` shows a **human-readable** run log
+- To keep the **raw** agent stream for debugging: set `MILHOUSE_AGENT_OUTPUT_MODE=stream-json` (writes `.milhouse/out.stream.jsonl`)
+
+### Reference docs
+
+- `MILHOUSE_PLAN.md` - Detailed implementation plan
+- `UI_RULES.md` - Milhouse-specific UI guidelines
+- `GUM_TUI_RULES.md` - General gum/TUI design principles
 
 ## Key Files
 
@@ -47,4 +68,4 @@ milhouse/
 
 ## Status
 
-🚧 **In Planning** - Project structure and design principles established. Implementation pending.
+✅ **Runnable** - `scripts/milhouse.sh` is implemented; use `install.sh` to install into other repos.

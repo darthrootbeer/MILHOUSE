@@ -2,9 +2,18 @@
 
 ## Active
 
+- [ ] [8F3A1C](TODO/8F3A1C.md) - Live terminal task announcements: show current TODO one-liner when Milhouse starts work
+- [ ] [6D9E2B](TODO/6D9E2B.md) - Session-start model picker with plain-English pros/cons (in UI)
+- [ ] [E7A9F0](TODO/E7A9F0.md) - Sexy runtime dashboard / fancy on-screen log (Claude Code terminal-mode vibe)
+
 ## In Progress
 
 ## Completed
+
+## Install & UX
+
+- [x] [C0FFEE](TODO/C0FFEE.md) - Add `install.sh` installer (with optional dependency installs)
+- [x] [BADA55](TODO/BADA55.md) - Clean up `.milhouse/out.txt` so it’s readable (keep raw stream separately)
 
 ## Phase 1: Core Loop
 
