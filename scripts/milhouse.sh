@@ -1560,7 +1560,7 @@ run_single_iteration() {
   local rotation_reason=""
   if rotation_reason=$(should_rotate "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL"); then
     log_rotation_reason "$rotation_reason"
-    log_out "$workspace" "Rotation heuristic triggered: $rotation_reason"
+    log_out "$workspace" "$health Token reset will occur soon — rotation triggered: $rotation_reason"
   fi
   
   # Gutter detection (Phase 3): stop and report why.
@@ -1712,7 +1712,7 @@ run_milhouse_loop() {
     if rotation_reason=$(should_rotate "$duration_seconds" "$files_changed" "$commits_in_iteration" "$iteration" "$ROTATION_INTERVAL"); then
       log_rotation_reason "$rotation_reason"
       echo ""
-      log_out "$workspace" "Rotation heuristic triggered: $rotation_reason"
+      log_out "$workspace" "$health Token reset will occur soon — rotation triggered: $rotation_reason"
     fi
     
     # Gutter detection (Phase 3): stop and report why.
