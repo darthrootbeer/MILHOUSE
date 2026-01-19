@@ -21,8 +21,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # CONFIGURATION
 # =============================================================================
 
-# Default model (can be overridden via environment or setup)
+# Default model (back-compat; used when MILHOUSE_STRATEGY=single)
 MODEL="${MILHOUSE_MODEL:-opus-4.5-thinking}"
+
+# Track whether the operator explicitly set MILHOUSE_MODEL (explicit choice wins)
+MODEL_EXPLICIT="0"
+if [[ -n "${MILHOUSE_MODEL+x}" ]] && [[ -n "${MILHOUSE_MODEL:-}" ]]; then
+  MODEL_EXPLICIT="1"
+fi
+
+# Model strategy (reduce cost by defaulting to a cheaper executor)
+# - smart: use MILHOUSE_EXECUTOR_MODEL; run a planner pass only when stuck
+# - single: use MODEL for all iterations (current behavior)
+STRATEGY="${MILHOUSE_STRATEGY:-smart}"
+EXECUTOR_MODEL="${MILHOUSE_EXECUTOR_MODEL:-sonnet-4}"
+PLANNER_MODEL="${MILHOUSE_PLANNER_MODEL:-opus-4.5-thinking}"
+PLAN_ON="${MILHOUSE_PLAN_ON:-stuck}"
+
+if [[ "$MODEL_EXPLICIT" == "1" ]]; then
+  # If the user explicitly set MILHOUSE_MODEL, do not second-guess them.
+  STRATEGY="single"
+fi
 
 # Default rotation interval (fixed rotation in Phase 1)
 ROTATION_INTERVAL="${MILHOUSE_ROTATION_INTERVAL:-5}"
@@ -738,10 +757,24 @@ format_duration_compact() {
 
 start_out_log_heartbeat() {
   # Args: workspace, iteration, model, prompt_chars
+  # Note: single-writer guarantee is enforced via .milhouse/heartbeat.pid
   local workspace="$1"
   local iteration="$2"
   local model="$3"
   local prompt_chars="${4:-0}"
+
+  # Ensure only one heartbeat is active for this workspace.
+  local hb_pid_file
+  hb_pid_file="$(milhouse_heartbeat_pid_file "$workspace")"
+  local prev_pid=""
+  prev_pid="$(read_pid_file "$hb_pid_file" || true)"
+  if [[ -n "$prev_pid" ]] && is_pid_running "$prev_pid"; then
+    kill_pid_with_timeout "$prev_pid" "heartbeat" 2
+  fi
+  rm -f "$hb_pid_file" >/dev/null 2>&1 || true
+
+  local run_id=""
+  run_id="$(ensure_run_id "$workspace")"
 
   local interval="${MILHOUSE_LOG_HEARTBEAT_SECONDS:-120}" # 2 minutes default
   if [[ -z "$interval" ]] || (( interval <= 0 )); then
@@ -750,10 +783,16 @@ start_out_log_heartbeat() {
 
   local prompt_tokens
   prompt_tokens="$(estimate_tokens_from_chars "$prompt_chars")"
-  local tok_emoji
-  tok_emoji="$(token_level_emoji "$prompt_tokens")"
+  local health_emoji
+  health_emoji="$(token_level_emoji "$prompt_tokens")"
 
-  log_out "$workspace" "Heartbeat: every ${interval}s (elapsed + token level). Prompt: ${tok_emoji} ~${prompt_tokens} tokens"
+  local task_line=""
+  task_line="$(get_first_unchecked_task_one_liner "$workspace")"
+  if [[ -z "$task_line" ]]; then
+    task_line="(no unchecked items)"
+  fi
+
+  log_out "$workspace" "Run $run_id | Iter $iteration | Heartbeat every ${interval}s | Model: $model | Prompt size estimate: ${health_emoji} ~${prompt_tokens} tokens"
 
   (
     local start_epoch
@@ -766,34 +805,40 @@ start_out_log_heartbeat() {
       local elapsed_s
       elapsed_s="$(format_duration_compact "$elapsed")"
 
-      # Prompt token level is a proxy for context size; it won't reflect hidden system tokens,
-      # but it's good enough for a “green/yellow/orange/red” signal.
       local emoji
       emoji="$(token_level_emoji "$prompt_tokens")"
 
-      local nudge=""
-      if [[ "$emoji" == "🟠" ]]; then
-        nudge=" — getting heavy; consider resetting soon"
+      local health="OK"
+      if [[ "$emoji" == "🟡" ]]; then
+        health="Busy"
+      elif [[ "$emoji" == "🟠" ]]; then
+        health="Heavy"
       elif [[ "$emoji" == "🔴" ]]; then
-        nudge=" — very heavy; reset strongly recommended"
+        health="Very heavy"
       fi
 
-      log_out "$workspace" "⏱️ ${elapsed_s} | tokens ${emoji} ~${prompt_tokens} (prompt)${nudge}"
+      log_out "$workspace" "Run $run_id | Iter $iteration | Elapsed: ${elapsed_s} | Working on: ${task_line} | Prompt size estimate: ${emoji} ~${prompt_tokens} | Health: ${health}"
     done
   ) &
 
-  echo $!
+  local pid=$!
+  echo "$pid" > "$hb_pid_file"
+  echo "$pid"
 }
 
 stop_out_log_heartbeat() {
-  # Args: pid
+  # Args: pid, [workspace]
   local pid="${1:-}"
+  local workspace="${2:-}"
   if [[ -z "$pid" ]]; then
     return 0
   fi
   if kill -0 "$pid" >/dev/null 2>&1; then
     kill "$pid" >/dev/null 2>&1 || true
     wait "$pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$workspace" ]]; then
+    rm -f "$(milhouse_heartbeat_pid_file "$workspace")" >/dev/null 2>&1 || true
   fi
 }
 
@@ -825,6 +870,12 @@ ARGUMENTS
 
 ENVIRONMENT VARIABLES
   MILHOUSE_MODEL              AI model to use (default: opus-4.5-thinking)
+  MILHOUSE_STRATEGY           smart (default) or single
+                             - smart: executor does work; planner runs only when stuck
+                             - single: one model for everything (MILHOUSE_MODEL)
+  MILHOUSE_EXECUTOR_MODEL     Model used for execution when MILHOUSE_STRATEGY=smart (default: sonnet-4)
+  MILHOUSE_PLANNER_MODEL      Model used for planning when stuck (default: opus-4.5-thinking)
+  MILHOUSE_PLAN_ON            When to run the planner (default: stuck)
   MILHOUSE_MAX_ITERATIONS     Maximum iterations before stopping (default: 20)
   MILHOUSE_ROTATION_INTERVAL  Fixed rotation every N iterations (default: 5)
   MILHOUSE_AGENT_OUTPUT_MODE  plain (default) or stream-json (also writes .milhouse/out.stream.jsonl)
@@ -968,6 +1019,8 @@ milhouse_pid_file() { echo "$1/.milhouse/milhouse.pid"; }
 milhouse_stop_after_file() { echo "$1/.milhouse/stop.after"; }
 milhouse_stop_now_file() { echo "$1/.milhouse/stop.now"; }
 milhouse_stop_reason_file() { echo "$1/.milhouse/stop.reason"; }
+milhouse_heartbeat_pid_file() { echo "$1/.milhouse/heartbeat.pid"; }
+milhouse_run_id_file() { echo "$1/.milhouse/run_id"; }
 
 # Runtime state used by signal handlers (best-effort; kept simple)
 CURRENT_WORKSPACE=""
@@ -975,11 +1028,43 @@ CURRENT_AGENT_PID=""
 CURRENT_AGENT_PIPE_PID=""
 CURRENT_AGENT_PIPE_FIFO=""
 CURRENT_HEARTBEAT_PID=""
+CURRENT_RUN_ID=""
 
 is_pid_running() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 1
   kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_pid_file() {
+  local pid_file="$1"
+  [[ -f "$pid_file" ]] || { echo ""; return 1; }
+  local pid
+  pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
+    echo "$pid"
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+ensure_run_id() {
+  # Args: workspace
+  # Creates a short run id for log lines (stable for a single milhouse process).
+  local workspace="$1"
+  local run_file
+  run_file="$(milhouse_run_id_file "$workspace")"
+  mkdir -p "$workspace/.milhouse"
+  if [[ -f "$run_file" ]]; then
+    CURRENT_RUN_ID="$(sed -n '1p' "$run_file" 2>/dev/null || true)"
+  fi
+  if [[ -z "${CURRENT_RUN_ID:-}" ]]; then
+    # Timestamp + pid is enough for uniqueness and readability.
+    CURRENT_RUN_ID="$(date '+%y%m%d-%H%M%S')-$$"
+    echo "$CURRENT_RUN_ID" > "$run_file"
+  fi
+  echo "$CURRENT_RUN_ID"
 }
 
 read_running_pid() {
@@ -1111,7 +1196,7 @@ cleanup_on_exit() {
   local code=$?
   if [[ -n "$CURRENT_WORKSPACE" ]]; then
     # Stop any active heartbeat and agent subprocesses
-    stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID"
+    stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID" "$CURRENT_WORKSPACE"
     CURRENT_HEARTBEAT_PID=""
     kill_current_agent_processes
 
@@ -2058,6 +2143,7 @@ Before doing anything:
 1. Read \`MILHOUSE_TASK.md\` - your task and completion criteria
 2. Read \`.milhouse/guardrails.md\` - lessons from past failures (FOLLOW THESE)
 3. Read \`.milhouse/progress.md\` - what's been accomplished
+4. If it exists, read \`.milhouse/plan.md\` - the latest “unstick” plan (follow it)
 
 ## Working Directory (Critical)
 
@@ -2112,6 +2198,98 @@ If you're truly stuck and making no progress:
 Work in: $workspace
 
 EOF
+}
+
+build_planner_prompt() {
+  # Args: workspace, iteration, reason
+  # Planner pass must NOT modify code; it writes an “unstick plan” only.
+  local workspace="$1"
+  local iteration="$2"
+  local reason="${3:-stuck}"
+
+  cat << EOF
+# Milhouse Planning Pass (Iteration $iteration)
+
+You are the PLANNER for a Milhouse run.
+
+Reason for planning pass: $reason
+
+## Rules (critical)
+- Do NOT modify any files.
+- Do NOT run commands that change the repo.
+- Your output must be a short markdown plan the executor can follow.
+
+## Read these files first
+1. \`MILHOUSE_TASK.md\`
+2. \`.milhouse/guardrails.md\`
+3. \`.milhouse/progress.md\`
+
+## Output format (write ONLY this)
+Produce a short plan with:
+- 1 sentence: what’s blocking progress
+- 3–7 steps: the smallest next actions to get unstuck
+- 1 sentence: how to verify success
+
+Keep it under ~60 lines. No extra commentary.
+EOF
+}
+
+clear_task_stale_hashes() {
+  # Args: workspace
+  local workspace="$1"
+  rm -f "$workspace/.milhouse/.task_hash."* >/dev/null 2>&1 || true
+}
+
+run_planner_pass() {
+  # Args: workspace, iteration, reason
+  local workspace="$1"
+  local iteration="$2"
+  local reason="${3:-stuck}"
+  local plan_file="$workspace/.milhouse/plan.md"
+  local tmp_file="$workspace/.milhouse/plan.md.tmp"
+
+  cd "$workspace" || return 1
+  mkdir -p "$workspace/.milhouse"
+  init_out_log "$workspace"
+  local run_id=""
+  run_id="$(ensure_run_id "$workspace")"
+
+  log_out_section "$workspace" "Planning pass (smart strategy)"
+  log_out "$workspace" "Run $run_id | Iter $iteration | Reason: $reason"
+  log_out "$workspace" "Planner model: $PLANNER_MODEL"
+  show_info "Planning pass: using $PLANNER_MODEL (writes .milhouse/plan.md)"
+
+  local prompt
+  prompt="$(build_planner_prompt "$workspace" "$iteration" "$reason")"
+
+  {
+    echo "# Milhouse plan (unstick)"
+    echo ""
+    echo "- Run: $run_id"
+    echo "- Iteration: $iteration"
+    echo "- Reason: $reason"
+    echo "- Planner model: $PLANNER_MODEL"
+    echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+  } > "$tmp_file"
+
+  # Write plan content (best-effort: planner is instructed to output markdown only).
+  if ! cursor-agent -p --force \
+    --workspace "$workspace" \
+    --model "$PLANNER_MODEL" \
+    "$prompt" >> "$tmp_file" 2>&1; then
+    log_out "$workspace" "Planner pass: non-zero exit"
+    show_warning "Planner pass failed (see .milhouse/out.txt)."
+    return 1
+  fi
+
+  mv "$tmp_file" "$plan_file"
+  log_out "$workspace" "Planner pass: wrote .milhouse/plan.md"
+  show_success "Planner pass complete (plan saved)"
+
+  # Reset staleness tracking so we don't immediately gutter again.
+  clear_task_stale_hashes "$workspace"
+  return 0
 }
 
 # =============================================================================
@@ -2210,7 +2388,7 @@ run_agent_iteration() {
     exit_code=0
     wait "$CURRENT_AGENT_PID" || exit_code=$?
   fi
-  stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID"
+  stop_out_log_heartbeat "$CURRENT_HEARTBEAT_PID" "$workspace"
   CURRENT_HEARTBEAT_PID=""
   CURRENT_AGENT_PID=""
   CURRENT_AGENT_PIPE_PID=""
@@ -2241,7 +2419,10 @@ run_single_iteration() {
   
   init_out_log "$workspace"
   log_out_section "$workspace" "Single iteration (mode: --once)"
-  log_out "$workspace" "Model: $model"
+  log_out "$workspace" "Strategy: $STRATEGY"
+  log_out "$workspace" "Model (single): $model"
+  log_out "$workspace" "Executor: $EXECUTOR_MODEL"
+  log_out "$workspace" "Planner: $PLANNER_MODEL"
   
   show_header "📋 Single Iteration Mode" 12
   echo ""
@@ -2417,7 +2598,10 @@ run_milhouse_loop() {
   
   init_out_log "$workspace"
   log_out_section "$workspace" "Loop run (mode: --loop)"
-  log_out "$workspace" "Model: $model"
+  log_out "$workspace" "Strategy: $STRATEGY"
+  log_out "$workspace" "Model (single): $model"
+  log_out "$workspace" "Executor: $EXECUTOR_MODEL"
+  log_out "$workspace" "Planner: $PLANNER_MODEL"
   log_out "$workspace" "Max iterations: $max_iterations"
   
   show_header "🔄 Loop Mode (max: $max_iterations iterations)" 12
@@ -2517,8 +2701,12 @@ Fix:
     local head_start=""
     head_start=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
     
-    # Run iteration
-    run_agent_iteration "$workspace" "$iteration" "$model"
+    # Run iteration (smart strategy defaults to executor model)
+    local iteration_model="$model"
+    if [[ "$STRATEGY" == "smart" ]]; then
+      iteration_model="$EXECUTOR_MODEL"
+    fi
+    run_agent_iteration "$workspace" "$iteration" "$iteration_model"
     local exit_code=$?
     
     # Keep TODO.md in sync with completed MILHOUSE_TASK.md items
@@ -2594,6 +2782,23 @@ Fix:
     # Gutter detection (Phase 3): stop and report why.
     local gutter_reason=""
     if gutter_reason=$(check_gutter "$workspace" "$iteration" "$duration_seconds" "$output_file" "MILHOUSE_TASK.md"); then
+      # Smart strategy: if we're stalled (no checkbox progress), do a planning pass instead of stopping.
+      if [[ "$STRATEGY" == "smart" ]] && [[ "$PLAN_ON" == "stuck" ]] && [[ "$gutter_reason" == "task file unchanged for 2+ iterations" ]]; then
+        echo ""
+        show_header "🧠 Stuck detected — running planner pass" 12
+        echo ""
+        show_warning "Reason: $gutter_reason"
+        log_out "$workspace" "Stuck detected: $gutter_reason (running planner pass)"
+        if run_planner_pass "$workspace" "$iteration" "$gutter_reason"; then
+          # After planning, continue the loop (executor reads .milhouse/plan.md next iteration).
+          echo ""
+          continue
+        else
+          show_warning "Planner pass failed; stopping for human review."
+          log_out "$workspace" "Planner pass failed; stopping (gutter)"
+          return 1
+        fi
+      fi
       echo ""
       show_header "🚨 Gutter detected - stopping loop" 1
       echo ""
@@ -2640,37 +2845,180 @@ Fix:
 # PHASE 4: INTERACTIVE SETUP
 # =============================================================================
 
-# Available models for selection
+# Available models for selection (fallback list).
+# If `cursor-agent --list-models` is supported, we replace this at runtime.
 AVAILABLE_MODELS=(
-  "opus-4.5-thinking"
-  "opus-4"
+  "auto"
   "sonnet-4"
   "sonnet-3.5"
+  "opus-4.5-thinking"
+  "opus-4"
 )
+
+refresh_available_models() {
+  # Best-effort: use cursor-agent if it can list models.
+  # Falls back to the baked-in defaults above.
+  command -v cursor-agent >/dev/null 2>&1 || return 0
+  local out=""
+  out="$(cursor-agent --list-models 2>/dev/null || true)"
+  [[ -n "$out" ]] || return 0
+
+  local models=()
+  local line=""
+  while IFS= read -r line; do
+    line="$(printf "%s" "$line" \
+      | tr -d '\r' \
+      | sed -E 's/^[[:space:]]*[-*][[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^[A-Za-z0-9][A-Za-z0-9._-]+$ ]]; then
+      models+=("$line")
+    fi
+  done <<< "$out"
+
+  if [[ ${#models[@]} -gt 0 ]]; then
+    AVAILABLE_MODELS=("${models[@]}")
+  fi
+}
+
+model_card_text() {
+  # Args: model
+  local model="$1"
+  case "$model" in
+    auto)
+      cat <<'EOF'
+Let Cursor pick for you.
+- Best for: convenience when you don't care which model runs
+- Upside: simple; often “good enough”
+- Trade-off: can be expensive and unpredictable for long runs
+EOF
+      ;;
+    opus*)
+      cat <<'EOF'
+Highest quality reasoning and planning.
+- Best for: hard bugs, architecture decisions, “unstick me” planning
+- Upside: strongest thinking and synthesis
+- Trade-off: slower and uses the most credits
+EOF
+      ;;
+    sonnet*)
+      cat <<'EOF'
+Balanced quality and cost.
+- Best for: day-to-day implementation work, refactors, most coding tasks
+- Upside: strong results without Opus-level cost
+- Trade-off: less “deep reasoning” than Opus on tricky problems
+EOF
+      ;;
+    haiku*)
+      cat <<'EOF'
+Fast and low cost.
+- Best for: small edits, simple scripts, quick fixes
+- Upside: cheapest/speediest option (when available)
+- Trade-off: can miss edge cases; may be limited for heavy tool use
+EOF
+      ;;
+    gpt-5*codex*|*codex*)
+      cat <<'EOF'
+Code-focused model.
+- Best for: code generation, mechanical refactors, tight diffs
+- Upside: often strong at code structure and edits
+- Trade-off: can be literal; may need clearer instructions on intent
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+Available in your account.
+- Best for: try on a small task first
+- Upside: might be a great fit for your workflow
+- Trade-off: Milhouse doesn't have strong priors for this model yet
+EOF
+      ;;
+  esac
+}
+
+render_models_catalog() {
+  local out=""
+  local m=""
+  for m in "${AVAILABLE_MODELS[@]}"; do
+    out+=$'\n'"$m"$'\n'
+    out+="$(model_card_text "$m")"$'\n'
+  done
+  printf "%s" "$out"
+}
+
+choose_strategy_gum() {
+  local selected
+  selected="$(gum choose --header "How should Milhouse run?" \
+    "Smart (recommended): cheaper model does the work; Opus plans only when stuck" \
+    "Single model: use one model for everything")"
+  if [[ "$selected" == Single* ]]; then
+    echo "single"
+  else
+    echo "smart"
+  fi
+}
+
+choose_strategy_plain() {
+  echo "How should Milhouse run?" >&2
+  echo "  1) Smart (recommended): cheaper model does the work; Opus plans only when stuck" >&2
+  echo "  2) Single model: use one model for everything" >&2
+  read -rp "Choice [1-2] (default: 1): " choice
+  choice="${choice:-1}"
+  if [[ "$choice" == "2" ]]; then
+    echo "single"
+  else
+    echo "smart"
+  fi
+}
+
+choose_model_with_card_gum() {
+  local header="$1"
+  while true; do
+    local selected
+    selected="$(gum choose --header "$header" "${AVAILABLE_MODELS[@]}")" || return 1
+    echo ""
+    gum style --border rounded --padding "0 2" --border-foreground 12 \
+      "Model: $selected" "" "$(model_card_text "$selected")"
+    echo ""
+    gum confirm "Use $selected?" && { echo "$selected"; return 0; }
+  done
+}
+
+choose_model_with_card_plain() {
+  local header="$1"
+  while true; do
+    echo "$header" >&2
+    local i=1
+    local m=""
+    for m in "${AVAILABLE_MODELS[@]}"; do
+      echo "  $i) $m" >&2
+      ((i++))
+    done
+    read -rp "Choice [1-${#AVAILABLE_MODELS[@]}] (default: 1): " choice
+    choice="${choice:-1}"
+    if [[ ! "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 ]] || [[ "$choice" -gt "${#AVAILABLE_MODELS[@]}" ]]; then
+      choice="1"
+    fi
+    local selected="${AVAILABLE_MODELS[$((choice - 1))]}"
+    echo "" >&2
+    echo "Model: $selected" >&2
+    model_card_text "$selected" >&2
+    echo "" >&2
+    read -rp "Use $selected? [Y/n] " confirm
+    if [[ -z "$confirm" ]] || [[ "$confirm" =~ ^[Yy]$ ]]; then
+      echo "$selected"
+      return 0
+    fi
+  done
+}
 
 # Interactive model selection
 # Returns: selected model via echo
 select_model_gum() {
-  local selected
-  selected=$(gum choose --header "Select AI model:" "${AVAILABLE_MODELS[@]}")
-  echo "$selected"
+  choose_model_with_card_gum "Select AI model:"
 }
 
 select_model_plain() {
-  echo "Select AI model:" >&2
-  local i=1
-  for model in "${AVAILABLE_MODELS[@]}"; do
-    echo "  $i) $model" >&2
-    ((i++))
-  done
-  read -rp "Choice [1-${#AVAILABLE_MODELS[@]}] (default: 1): " choice
-  choice="${choice:-1}"
-  # Validate and return
-  if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#AVAILABLE_MODELS[@]}" ]]; then
-    echo "${AVAILABLE_MODELS[$((choice - 1))]}"
-  else
-    echo "${AVAILABLE_MODELS[0]}"
-  fi
+  choose_model_with_card_plain "Select AI model:"
 }
 
 # Interactive max iterations input
@@ -2692,12 +3040,18 @@ confirm_setup_gum() {
   local model="$1"
   local iterations="$2"
   local workspace="$3"
+  local strategy="${4:-single}"
+  local executor="${5:-}"
+  local planner="${6:-}"
   
   echo ""
   gum style --border double --padding "0 2" --border-foreground 212 \
     "Configuration Summary" \
     "" \
+    "Strategy:   $strategy" \
     "Model:      $model" \
+    "Executor:   ${executor:-$model}" \
+    "Planner:    ${planner:-$PLANNER_MODEL}" \
     "Max iter:   $iterations" \
     "Workspace:  $workspace"
   echo ""
@@ -2709,11 +3063,17 @@ confirm_setup_plain() {
   local model="$1"
   local iterations="$2"
   local workspace="$3"
+  local strategy="${4:-single}"
+  local executor="${5:-}"
+  local planner="${6:-}"
   
   echo ""
   show_header "Configuration Summary" 212
   echo ""
+  show_info "Strategy:   $strategy"
   show_info "Model:      $model"
+  show_info "Executor:   ${executor:-$model}"
+  show_info "Planner:    ${planner:-$PLANNER_MODEL}"
   show_info "Max iter:   $iterations"
   show_info "Workspace:  $workspace"
   echo ""
@@ -2726,6 +3086,7 @@ confirm_setup_plain() {
 # Returns: 0 if setup complete, 1 if cancelled
 interactive_setup() {
   local workspace="$1"
+  refresh_available_models
   
   echo ""
   if [[ "$HAS_GUM" == "true" ]]; then
@@ -2733,14 +3094,28 @@ interactive_setup() {
       "Milhouse Interactive Setup"
     echo ""
     
-    # Model selection
-    MODEL=$(select_model_gum)
+    # Strategy + models
+    STRATEGY="$(choose_strategy_gum)" || { gum style --foreground 3 "Setup cancelled."; return 1; }
+    if [[ "$STRATEGY" == "smart" ]]; then
+      # Show what models are actually available on this machine/account.
+      echo ""
+      printf "%s\n" "$(render_models_catalog)" | gum pager --line-numbers || true
+      EXECUTOR_MODEL="$(choose_model_with_card_gum "Select executor model (does the work):")" || { gum style --foreground 3 "Setup cancelled."; return 1; }
+      if gum confirm "Use $PLANNER_MODEL for planning when stuck?"; then
+        :
+      else
+        PLANNER_MODEL="$(choose_model_with_card_gum "Select planner model (plans when stuck):")" || { gum style --foreground 3 "Setup cancelled."; return 1; }
+      fi
+      MODEL="$EXECUTOR_MODEL"
+    else
+      MODEL="$(select_model_gum)" || { gum style --foreground 3 "Setup cancelled."; return 1; }
+    fi
     
     # Max iterations
     MAX_ITERATIONS=$(select_iterations_gum)
     
     # Confirm
-    if ! confirm_setup_gum "$MODEL" "$MAX_ITERATIONS" "$workspace"; then
+    if ! confirm_setup_gum "$MODEL" "$MAX_ITERATIONS" "$workspace" "$STRATEGY" "$EXECUTOR_MODEL" "$PLANNER_MODEL"; then
       gum style --foreground 3 "Setup cancelled."
       return 1
     fi
@@ -2750,14 +3125,28 @@ interactive_setup() {
     show_info "(Install 'gum' for a better experience: https://github.com/charmbracelet/gum)"
     echo ""
     
-    # Model selection
-    MODEL=$(select_model_plain)
+    # Strategy + models
+    STRATEGY="$(choose_strategy_plain)"
+    echo "" >&2
+    echo "Available models on this machine/account:" >&2
+    echo "$(render_models_catalog)" >&2
+    echo "" >&2
+    if [[ "$STRATEGY" == "smart" ]]; then
+      EXECUTOR_MODEL="$(choose_model_with_card_plain "Select executor model (does the work):")" || { echo "Setup cancelled."; return 1; }
+      read -rp "Use $PLANNER_MODEL for planning when stuck? [Y/n] " confirm_planner
+      if [[ -n "$confirm_planner" ]] && [[ ! "$confirm_planner" =~ ^[Yy]$ ]]; then
+        PLANNER_MODEL="$(choose_model_with_card_plain "Select planner model (plans when stuck):")" || { echo "Setup cancelled."; return 1; }
+      fi
+      MODEL="$EXECUTOR_MODEL"
+    else
+      MODEL="$(select_model_plain)" || { echo "Setup cancelled."; return 1; }
+    fi
     
     # Max iterations
     MAX_ITERATIONS=$(select_iterations_plain)
     
     # Confirm
-    if ! confirm_setup_plain "$MODEL" "$MAX_ITERATIONS" "$workspace"; then
+    if ! confirm_setup_plain "$MODEL" "$MAX_ITERATIONS" "$workspace" "$STRATEGY" "$EXECUTOR_MODEL" "$PLANNER_MODEL"; then
       echo "Setup cancelled."
       return 1
     fi
@@ -2766,6 +3155,79 @@ interactive_setup() {
   echo ""
   echo "Starting Milhouse..."
   echo ""
+  return 0
+}
+
+is_interactive_terminal() {
+  [[ -t 0 ]] && [[ -t 1 ]]
+}
+
+maybe_prompt_for_models_at_session_start() {
+  # Args: workspace
+  # Prompt at session start unless MILHOUSE_MODEL was explicitly set.
+  local workspace="$1"
+
+  if [[ "$MODEL_EXPLICIT" == "1" ]]; then
+    return 0
+  fi
+
+  if ! is_interactive_terminal; then
+    return 0
+  fi
+
+  refresh_available_models
+
+  # Stop any previously orphaned heartbeat for this workspace (single-writer).
+  local hb_pid_file
+  hb_pid_file="$(milhouse_heartbeat_pid_file "$workspace")"
+  local prev_pid=""
+  prev_pid="$(read_pid_file "$hb_pid_file" || true)"
+  if [[ -n "$prev_pid" ]] && is_pid_running "$prev_pid"; then
+    kill_pid_with_timeout "$prev_pid" "heartbeat" 2
+  fi
+  rm -f "$hb_pid_file" >/dev/null 2>&1 || true
+
+  init_out_log "$workspace"
+  local run_id=""
+  run_id="$(ensure_run_id "$workspace")"
+
+  # Show available models + cards so the operator can make an informed choice.
+  if [[ "$HAS_GUM" == "true" ]]; then
+    echo ""
+    printf "%s\n" "$(render_models_catalog)" | gum pager --line-numbers || true
+    echo ""
+    STRATEGY="$(choose_strategy_gum)" || { show_warning "Cancelled. Tip: set MILHOUSE_MODEL or MILHOUSE_STRATEGY to skip prompts."; exit 0; }
+    if [[ "$STRATEGY" == "smart" ]]; then
+      EXECUTOR_MODEL="$(choose_model_with_card_gum "Select executor model (does the work):")" || { show_warning "Cancelled."; exit 0; }
+      if gum confirm "Use $PLANNER_MODEL for planning when stuck?"; then
+        :
+      else
+        PLANNER_MODEL="$(choose_model_with_card_gum "Select planner model (plans when stuck):")" || { show_warning "Cancelled."; exit 0; }
+      fi
+      MODEL="$EXECUTOR_MODEL"
+    else
+      MODEL="$(select_model_gum)" || { show_warning "Cancelled."; exit 0; }
+    fi
+  else
+    echo "" >&2
+    echo "Available models on this machine/account:" >&2
+    echo "$(render_models_catalog)" >&2
+    echo "" >&2
+    STRATEGY="$(choose_strategy_plain)"
+    if [[ "$STRATEGY" == "smart" ]]; then
+      EXECUTOR_MODEL="$(choose_model_with_card_plain "Select executor model (does the work):")" || { echo "Cancelled."; exit 0; }
+      read -rp "Use $PLANNER_MODEL for planning when stuck? [Y/n] " confirm_planner
+      if [[ -n "$confirm_planner" ]] && [[ ! "$confirm_planner" =~ ^[Yy]$ ]]; then
+        PLANNER_MODEL="$(choose_model_with_card_plain "Select planner model (plans when stuck):")" || { echo "Cancelled."; exit 0; }
+      fi
+      MODEL="$EXECUTOR_MODEL"
+    else
+      MODEL="$(select_model_plain)" || { echo "Cancelled."; exit 0; }
+    fi
+  fi
+
+  log_out "$workspace" "Run $run_id | Strategy selected: $STRATEGY"
+  log_out "$workspace" "Run $run_id | Executor: ${EXECUTOR_MODEL:-$MODEL} | Planner: ${PLANNER_MODEL:-}"
   return 0
 }
 
@@ -2818,6 +3280,15 @@ main() {
       else
         show_warning "No running Milhouse PID found; syncing TODO anyway."
       fi
+      # Best-effort: stop any orphaned heartbeat for this workspace.
+      local hb_pid_file
+      hb_pid_file="$(milhouse_heartbeat_pid_file "$WORKSPACE")"
+      local hb_pid=""
+      hb_pid="$(read_pid_file "$hb_pid_file" || true)"
+      if [[ -n "$hb_pid" ]] && is_pid_running "$hb_pid"; then
+        kill_pid_with_timeout "$hb_pid" "heartbeat" 2
+      fi
+      rm -f "$hb_pid_file" >/dev/null 2>&1 || true
       # Even if the running process couldn't do its own cleanup, sync TODO now (best-effort).
       sync_task_progress_to_todo "$WORKSPACE" || true
       show_success "Stop-now complete (best-effort)."
@@ -2851,6 +3322,12 @@ main() {
   if ! ensure_task_file "$WORKSPACE"; then
     show_warning "No task selected. Exiting."
     exit 0
+  fi
+
+  # Session-start model picker (unless MILHOUSE_MODEL was explicitly set).
+  # Applies to real runs (once/loop); setup has its own flow.
+  if [[ "$MODE" == "once" ]] || [[ "$MODE" == "loop" ]]; then
+    maybe_prompt_for_models_at_session_start "$WORKSPACE"
   fi
   
   # Execute based on mode

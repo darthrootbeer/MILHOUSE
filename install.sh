@@ -24,16 +24,18 @@ FORCE="0"
 YES="0"
 INSTALL_GUM="${INSTALL_GUM:-0}"
 INSTALL_CURSOR_AGENT="${INSTALL_CURSOR_AGENT:-0}"
+GLOBAL="0"
 
 usage() {
   cat <<'EOF'
 Milhouse installer
 
 USAGE
-  ./install.sh [--target PATH] [--force] [--yes] [--install-gum] [--install-cursor-agent] [--help]
+  ./install.sh [--target PATH] [--global] [--force] [--yes] [--install-gum] [--install-cursor-agent] [--help]
 
 OPTIONS
   --target PATH   Install into PATH (default: current directory)
+  --global        Install a global `milhouse` command into ~/.local/bin
   --force         Overwrite existing scripts/milhouse.sh if present
   --yes           Auto-install recommended tools (where possible)
   --install-gum   Install gum if missing (Homebrew on macOS, apt/dnf on Linux)
@@ -43,6 +45,7 @@ OPTIONS
 
 WHAT IT DOES
   - Installs Milhouse runner to: scripts/milhouse.sh
+  - Optionally installs a global runner to: ~/.local/bin/milhouse
   - Ensures .gitignore contains: .milhouse/
 
 RECOMMENDED TOOLS
@@ -164,6 +167,10 @@ while [[ $# -gt 0 ]]; do
       TARGET_DIR="${2:-}"
       shift 2
       ;;
+    --global)
+      GLOBAL="1"
+      shift
+      ;;
     --force)
       FORCE="1"
       shift
@@ -220,6 +227,29 @@ echo ""
 install_gum
 install_cursor_agent
 
+# Optional: global install (copy runner into ~/.local/bin/milhouse).
+if [[ "$GLOBAL" == "1" ]]; then
+  GLOBAL_BIN_DIR="${HOME}/.local/bin"
+  mkdir -p "$GLOBAL_BIN_DIR"
+  GLOBAL_MILHOUSE="$GLOBAL_BIN_DIR/milhouse"
+  if [[ -f "$GLOBAL_MILHOUSE" ]] && [[ "$FORCE" != "1" ]]; then
+    echo "Already installed: $GLOBAL_MILHOUSE exists"
+    echo "Skip: not overwriting (use --force to overwrite)"
+  else
+    if [[ -f "$GLOBAL_MILHOUSE" ]] && [[ "$FORCE" == "1" ]]; then
+      cp "$GLOBAL_MILHOUSE" "$GLOBAL_MILHOUSE.bak.$(date +%Y%m%d-%H%M%S)" || true
+    fi
+    cp "$SOURCE_MILHOUSE_SH" "$GLOBAL_MILHOUSE"
+    chmod +x "$GLOBAL_MILHOUSE"
+    echo "✓ Installed global command: $GLOBAL_MILHOUSE"
+    echo ""
+    echo "Note:"
+    echo "  Ensure ~/.local/bin is on your PATH."
+    echo "  (On macOS zsh, you can add this to ~/.zshrc: export PATH=\"$GLOBAL_BIN_DIR:\$PATH\")"
+  fi
+  echo ""
+fi
+
 # Ensure target has scripts/ directory
 mkdir -p "$TARGET_DIR/scripts"
 
@@ -260,5 +290,9 @@ fi
 
 echo ""
 echo "Next:"
-echo "  Run: ./scripts/milhouse.sh"
+if [[ "$GLOBAL" == "1" ]]; then
+  echo "  Run: milhouse --loop \"$(pwd)\""
+else
+  echo "  Run: ./scripts/milhouse.sh"
+fi
 echo ""
