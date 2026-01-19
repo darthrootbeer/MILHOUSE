@@ -240,6 +240,43 @@ todo_lines_from_selected_labels() {
   printf "%s" "$out"
 }
 
+# Pick TODO items (interactive) and write MILHOUSE_TASK.md.
+pick_tasks_from_todo_md() {
+  local workspace="$1"
+  local items
+  items="$(list_unchecked_todo_items "$workspace")"
+  if [[ -z "$items" ]]; then
+    show_error "No unchecked TODO items found" \
+      "Milhouse looked for unchecked items in:
+  $workspace/TODO.md
+
+Fix: Add tasks in TODO.md using this format:
+  - [ ] [ABC123](TODO/ABC123.md) - My next task"
+    return 1
+  fi
+
+  local selected=""
+  if [[ "$HAS_GUM" == "true" ]]; then
+    local menu
+    menu="$(while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      todo_menu_label_for_line "$line"
+    done <<< "$items")"
+    local picked
+    picked="$(printf "%s\n" "$menu" | gum choose --no-limit --header "Select TODO items for this run:")"
+    selected="$(todo_lines_from_selected_labels "$items" "$picked")"
+  else
+    show_info "Paste the TODO lines you want Milhouse to work on (end with an empty line):"
+    local line
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && break
+      selected="${selected}${line}"$'\n'
+    done
+  fi
+
+  create_task_from_todo_selection "$workspace" "$selected"
+}
+
 # Create MILHOUSE_TASK.md from selected TODO.md lines.
 # Args: workspace, selected_lines (newline-separated)
 create_task_from_todo_selection() {
@@ -320,7 +357,31 @@ ensure_task_file() {
   local task_file="$workspace/MILHOUSE_TASK.md"
   
   if [[ -f "$task_file" ]]; then
-    return 0
+    local status
+    status="$(check_task_complete "$workspace" || true)"
+
+    # If the task file is runnable and still has work, keep going.
+    if [[ "$status" == INCOMPLETE:* ]]; then
+      return 0
+    fi
+
+    # If the task file is complete but TODO.md still has unchecked items, prompt for a new run.
+    if [[ "$status" == "COMPLETE" ]]; then
+      local items
+      items="$(list_unchecked_todo_items "$workspace")"
+      if [[ -n "$items" ]] && [[ -t 0 ]] && [[ -t 1 ]]; then
+        show_warning "MILHOUSE_TASK.md is complete, but TODO.md still has unchecked items."
+        show_info "Pick tasks from TODO.md to start a new run."
+        pick_tasks_from_todo_md "$workspace"
+        return $?
+      fi
+      return 0
+    fi
+
+    # If task file exists but has no checkbox criteria, treat it as “missing” and go to setup below.
+    if [[ "$status" == "NO_CRITERIA" ]]; then
+      show_warning "MILHOUSE_TASK.md has no checkbox criteria. Please pick tasks or define a goal."
+    fi
   fi
   
   show_header "Milhouse setup: choose what to work on" 12
@@ -344,39 +405,7 @@ ensure_task_file() {
   fi
   
   if [[ "$choice" == "Use TODO.md (pick tasks)" ]]; then
-    local items
-    items="$(list_unchecked_todo_items "$workspace")"
-    if [[ -z "$items" ]]; then
-      show_error "No unchecked TODO items found" \
-        "Milhouse looked for unchecked items in:
-  $workspace/TODO.md
-
-Fix: Add tasks in TODO.md using this format:
-  - [ ] My next task"
-      return 1
-    fi
-    
-    local selected=""
-    if [[ "$HAS_GUM" == "true" ]]; then
-      # Multi-select checklist (show short, readable labels; map back to real lines)
-      local menu
-      menu="$(while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        todo_menu_label_for_line "$line"
-      done <<< "$items")"
-      local picked
-      picked="$(printf "%s\n" "$menu" | gum choose --no-limit --header "Select TODO items for this run:")"
-      selected="$(todo_lines_from_selected_labels "$items" "$picked")"
-    else
-      show_info "Paste the TODO lines you want Milhouse to work on (end with an empty line):"
-      local line
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && break
-        selected="${selected}${line}"$'\n'
-      done
-    fi
-    
-    create_task_from_todo_selection "$workspace" "$selected"
+    pick_tasks_from_todo_md "$workspace"
     return $?
   fi
   
@@ -1133,6 +1162,8 @@ read_task_file() {
 # Check if task is complete
 # Args: workspace
 # Returns: "COMPLETE" or "INCOMPLETE:N" where N is remaining count
+#          "NO_TASK_FILE" if missing
+#          "NO_CRITERIA" if file has zero checkboxes (treated as not runnable)
 check_task_complete() {
   local workspace="$1"
   local task_file="$workspace/MILHOUSE_TASK.md"
@@ -1141,12 +1172,18 @@ check_task_complete() {
     echo "NO_TASK_FILE"
     return 1
   fi
-  
-  # Count unchecked checkboxes
-  # Matches: "- [ ]", "* [ ]", "1. [ ]", etc.
-  local unchecked
+
+  # Count all checkboxes and unchecked checkboxes.
+  # Matches: "- [ ]", "* [x]", "1. [ ]", etc.
+  local total unchecked
+  total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$task_file" 2>/dev/null) || total=0
   unchecked=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null) || unchecked=0
-  
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "NO_CRITERIA"
+    return 1
+  fi
+
   if [[ "$unchecked" -eq 0 ]]; then
     echo "COMPLETE"
     return 0
