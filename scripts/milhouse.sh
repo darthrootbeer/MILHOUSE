@@ -1389,19 +1389,14 @@ run_agent_iteration() {
   log_out "$workspace" "Prompt length: ${#prompt} chars"
   log_out "$workspace" "Milhouse will append agent output below."
   
-  # Execute with spinner if gum available, plain message otherwise
-  local exit_code
-  if [[ "$HAS_GUM" == "true" ]]; then
-    # Use gum spin to show spinner during agent execution
-    # Note: gum spin runs command and shows spinner, output goes to file
-    gum spin --spinner dot --title "Agent working on iteration $iteration..." -- \
-      sh -c "cursor-agent -p --force --model \"$model\" \"\$1\" >> \"$output_file\" 2>&1" -- "$prompt"
-    exit_code=$?
-  else
-    echo "Agent working on iteration $iteration..."
-    cursor-agent -p --force --model "$model" "$prompt" >> "$output_file" 2>&1
-    exit_code=$?
-  fi
+  # Execute the agent.
+  #
+  # Note: we intentionally avoid wrapping cursor-agent with `gum spin` here.
+  # In practice, spinner wrappers can cause “Aborting operation...” or apparent hangs.
+  # The “Follow along” tail command is the preferred live view.
+  echo "Agent working on iteration $iteration..."
+  cursor-agent -p --force --model "$model" "$prompt" >> "$output_file" 2>&1
+  local exit_code=$?
   
   if [[ $exit_code -eq 0 ]]; then
     show_success "Iteration $iteration completed"
