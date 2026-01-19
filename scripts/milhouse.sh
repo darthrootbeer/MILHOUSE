@@ -2092,12 +2092,30 @@ run_single_iteration() {
   
   # Check current completion status
   local task_status
-  task_status=$(check_task_complete "$workspace")
+  task_status=$(check_task_complete "$workspace" || true)
   
   if [[ "$task_status" == "COMPLETE" ]]; then
-    echo "🎉 Task already complete! All criteria are checked."
-    log_out "$workspace" "Status: COMPLETE (no work needed)"
+    local items
+    items="$(list_unchecked_todo_items "$workspace")"
+    if [[ -n "$items" ]]; then
+      echo "⚠ MILHOUSE_TASK.md is complete, but TODO.md still has unchecked items."
+      echo "Run again and choose tasks from TODO.md to start a new run."
+      log_out "$workspace" "Status: COMPLETE (TODO.md still has unchecked items)"
+    else
+      echo "🎉 Task already complete! All criteria are checked."
+      log_out "$workspace" "Status: COMPLETE (no work needed)"
+    fi
     return 0
+  fi
+
+  if [[ "$task_status" == "NO_CRITERIA" ]]; then
+    show_error "MILHOUSE_TASK.md has no checkbox criteria" \
+      "Milhouse needs checkbox criteria to track progress.
+
+Fix:
+  - Delete or update MILHOUSE_TASK.md to include checkboxes
+  - Or re-run and pick tasks from TODO.md to generate a new MILHOUSE_TASK.md"
+    return 1
   fi
   
   # Show current progress
@@ -2237,10 +2255,27 @@ run_milhouse_loop() {
   
   # Check if already complete
   local task_status
-  task_status=$(check_task_complete "$workspace")
+  task_status=$(check_task_complete "$workspace" || true)
   if [[ "$task_status" == "COMPLETE" ]]; then
-    echo "🎉 Task already complete! All criteria are checked."
+    local items
+    items="$(list_unchecked_todo_items "$workspace")"
+    if [[ -n "$items" ]]; then
+      echo "⚠ MILHOUSE_TASK.md is complete, but TODO.md still has unchecked items."
+      echo "Re-run Milhouse and pick tasks from TODO.md to start a new run."
+    else
+      echo "🎉 Task already complete! All criteria are checked."
+    fi
     return 0
+  fi
+
+  if [[ "$task_status" == "NO_CRITERIA" ]]; then
+    show_error "MILHOUSE_TASK.md has no checkbox criteria" \
+      "Milhouse needs checkbox criteria to track progress.
+
+Fix:
+  - Delete or update MILHOUSE_TASK.md to include checkboxes
+  - Or re-run and pick tasks from TODO.md to generate a new MILHOUSE_TASK.md"
+    return 1
   fi
   
   echo "🚀 Starting Milhouse loop..."
@@ -2317,7 +2352,7 @@ run_milhouse_loop() {
     log_out "$workspace" "$token_line"
     
     # Check completion
-    task_status=$(check_task_complete "$workspace")
+    task_status=$(check_task_complete "$workspace" || true)
     
     if [[ "$task_status" == "COMPLETE" ]]; then
       echo ""
@@ -2372,7 +2407,7 @@ run_milhouse_loop() {
   show_header "⚠️  Maximum iterations reached ($max_iterations)" 3
   echo ""
   log_out "$workspace" "Status: STOPPED (max iterations reached: $max_iterations)"
-  task_status=$(check_task_complete "$workspace")
+  task_status=$(check_task_complete "$workspace" || true)
   if [[ "$task_status" == "COMPLETE" ]]; then
     show_success "Task is complete!"
     log_out "$workspace" "Final status: COMPLETE"
