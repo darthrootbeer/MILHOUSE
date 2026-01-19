@@ -328,6 +328,7 @@ create_task_from_todo_selection() {
     echo ""
   } > "$task_file"
   
+  reset_iteration_for_new_task_run "$workspace"
   show_success "Created MILHOUSE_TASK.md from TODO.md selection"
   return 0
 }
@@ -451,6 +452,7 @@ ensure_task_file() {
     echo ""
   } > "$task_file"
   
+  reset_iteration_for_new_task_run "$workspace"
   show_success "Created MILHOUSE_TASK.md (custom goal scaffold)"
   return 0
 }
@@ -1099,6 +1101,11 @@ init_state() {
   if [[ ! -f "$milhouse_dir/iteration" ]]; then
     echo "0" > "$milhouse_dir/iteration"
   fi
+
+  # Initialize per-task-run id if missing (used to reset iteration across new task runs)
+  if [[ ! -f "$milhouse_dir/task_run_id" ]]; then
+    echo "0" > "$milhouse_dir/task_run_id"
+  fi
   
   # Initialize progress.md if missing
   if [[ ! -f "$milhouse_dir/progress.md" ]]; then
@@ -1245,6 +1252,47 @@ increment_iteration() {
   local next=$((current + 1))
   set_iteration "$workspace" "$next"
   echo "$next"
+}
+
+# =============================================================================
+# TASK RUN ID (separates iteration counters across new MILHOUSE_TASK.md runs)
+# =============================================================================
+
+get_task_run_id() {
+  local workspace="$1"
+  local f="$workspace/.milhouse/task_run_id"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  else
+    echo "0"
+  fi
+}
+
+set_task_run_id() {
+  local workspace="$1"
+  local id="${2:-0}"
+  mkdir -p "$workspace/.milhouse"
+  echo "$id" > "$workspace/.milhouse/task_run_id"
+}
+
+bump_task_run_id() {
+  local workspace="$1"
+  local cur
+  cur="$(get_task_run_id "$workspace")"
+  if [[ -z "$cur" ]] || ! [[ "$cur" =~ ^[0-9]+$ ]]; then
+    cur="0"
+  fi
+  local next=$((cur + 1))
+  set_task_run_id "$workspace" "$next"
+  echo "$next"
+}
+
+reset_iteration_for_new_task_run() {
+  local workspace="$1"
+  local new_id
+  new_id="$(bump_task_run_id "$workspace")"
+  set_iteration "$workspace" "0"
+  show_info "Starting new task run (run id: $new_id). Iteration counter reset."
 }
 
 # =============================================================================
@@ -1697,7 +1745,7 @@ count_files_changed_since_commit() {
 #       task_file (default MILHOUSE_TASK.md)
 #       stale_threshold (default 2)
 # Returns: 0 if gutter (no change for 2+ iterations), 1 if OK
-# Stores task file hash in .milhouse/.task_hash.{iteration}
+# Stores task file hash in .milhouse/.task_hash.{run_id}.{iteration}
 check_task_file_stale() {
   local workspace="${1:-.}"
   local current_iteration="${2:-0}"
@@ -1737,9 +1785,16 @@ check_task_file_stale() {
   
   local milhouse_dir="$workspace/.milhouse"
   mkdir -p "$milhouse_dir"
+
+  # Namespace by run id so a new task run doesn't inherit old hashes.
+  local run_id
+  run_id="$(get_task_run_id "$workspace")"
+  if [[ -z "$run_id" ]] || ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+    run_id="0"
+  fi
   
   # Store current hash
-  echo "$current_hash" > "$milhouse_dir/.task_hash.$current_iteration"
+  echo "$current_hash" > "$milhouse_dir/.task_hash.${run_id}.$current_iteration"
   
   # Check previous N iterations for same hash
   local unchanged_count=0
@@ -1747,7 +1802,7 @@ check_task_file_stale() {
   local stop_at=$((current_iteration - stale_threshold))
   
   while [[ $i -ge $stop_at ]] && [[ $i -ge 0 ]]; do
-    local prev_hash_file="$milhouse_dir/.task_hash.$i"
+    local prev_hash_file="$milhouse_dir/.task_hash.${run_id}.$i"
     if [[ -f "$prev_hash_file" ]]; then
       local prev_hash
       prev_hash=$(cat "$prev_hash_file" 2>/dev/null || echo "")
